@@ -1,0 +1,67 @@
+<!-- kv3 encoding:text:version{test} format:generic:version{test} -->
+{
+    generic_data_type = "CCitadelAbilityVData"
+    _include = [resource_name:"scripts/abilities/test.vdata_inc"]
+    item_base = { _not_pickable = 2 m_eAbilityType = "EAbilityType_Item" }
+    upgrade_vampire = {
+        _class = "citadel_item"
+        _multibase = ["item_base"]
+        m_eAbilityType = "EAbilityType_Item"
+        m_iItemTier = "EModTier_2"
+        m_eItemSlotType = "EItemSlotType_Armor"
+        m_bDisabled = "false"
+        m_mapAbilityProperties = {
+            BulletLifestealPercent = {
+                m_strValue = "13"
+                m_eProvidedPropertyType = "MODIFIER_VALUE_BULLET_LIFESTEAL"
+                m_subclassScaleFunction = subclass:{
+                    _class = "scale_function_single_stat"
+                    m_eSpecificStatScaleType = "EHealingOutput"
+                    m_flStatScale = 0.0
+                    m_flStreetBrawlStatScale = "0.25"
+                    m_bFunctionDisabled = "false"
+                    m_sFutureScaleField = "preserve me"
+                }
+            }
+            AbilityDuration = { m_strValue = "0" }
+            TierValues = { m_strValue = "1 2 3" }
+            Expression = { m_strValue = "damage * 0.5" }
+            NotANumber = { m_strValue = "NaN" }
+            MissingValue = { m_strCSSClass = "healing" }
+        }
+        m_AutoIntrinsicModifiers = [subclass:{
+            _class = "modifier_intrinsic_base"
+            _my_subclass_name = "modifier_intrinsic_base"
+            m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["BulletLifestealPercent"]
+        }]
+    }
+    upgrade_surging_power = {
+        _class = "upgrade_surging_power"
+        m_eAbilityType = "EAbilityType_Item"
+        m_bDisabled = 1
+        m_mapAbilityProperties = {
+            BulletLifestealPercent = { m_strValue = 13.0 }
+            ActiveBonusLifesteal = { m_strValue = "70" }
+            AbilityDuration = {
+                m_strValue = "5"
+                m_eDisplayUnits = "EDisplayUnit_Seconds"
+                m_eStatsUsageFlags = "ConditionallyApplied"
+                m_subclassScaleFunction = subclass:{
+                    _class = "scale_function_multi_stats"
+                    m_vecScalingStats = ["EChannelDuration", "ETechDuration"]
+                }
+            }
+        }
+        m_vecAbilityUpgrades = [{m_vecPropertyUpgrades = [
+            {m_strPropertyName = "BulletLifestealPercent" m_strBonus = "16"}
+        ]}]
+        m_AutoIntrinsicModifiers = [subclass:{
+            _class = "modifier_intrinsic_base"
+            _my_subclass_name = "modifier_intrinsic_base"
+            m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["ActiveBonusLifesteal", "UnknownProperty"]
+            m_flDuration = 5.0
+            m_bIsHidden = false
+        }]
+    }
+    ability_unlocalized = { _class = "citadel_ability_base" }
+}

@@ -1,0 +1,12 @@
+{
+    generic_data_type = "CModifierVData"
+    modifier_citadel_in_fountain = {
+        _class = "modifier_citadel_in_fountain"
+        m_bIsHidden = true
+        m_eDebuffType = "MODIFIER_DEBUFF_NO"
+        m_Child = subclass:{
+            _class = "modifier_intrinsic_base"
+            _my_subclass_name = "nested_shared_modifier"
+        }
+    }
+}

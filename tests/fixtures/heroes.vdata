@@ -1,0 +1,13 @@
+{
+    generic_data_type = "CitadelHeroData_t"
+    hero_dynamo = {
+        _class = "CitadelHeroData_t"
+        m_HeroID = 11
+        m_bPlayerSelectable = true
+        m_bDisabled = false
+        m_mapStartingStats = { EMaxHealth = 830.0 ETechArmorDamageReduction = 0.0 }
+        m_mapStandardLevelUpUpgrades = { MODIFIER_VALUE_BULLET_ARMOR_DAMAGE_RESIST = 0.625 }
+        m_mapBoundAbilities = { ESlot_Signature_1 = "ability_unlocalized" }
+        m_mapScalingStats = { ETechArmorDamageReduction = { flScale = 0.1 } }
+    }
+}

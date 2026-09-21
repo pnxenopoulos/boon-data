@@ -1,0 +1,10 @@
+"lang" {
+    "Language" "english"
+    "Tokens" {
+        "upgrade_vampire" "Bullet Lifesteal"
+        "upgrade_surging_power" "Vampiric Burst"
+        "hero_dynamo:n" "Dynamo"
+        "hero_dynamo:search" "Not the display name"
+        // "ability_unlocalized" "This comment is not a name"
+    }
+}

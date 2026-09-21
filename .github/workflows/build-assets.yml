@@ -1,0 +1,38 @@
+name: Build boon-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: GameTracking-Deadlock branch, tag, or commit
+        default: master
+        type: string
+  schedule:
+    - cron: "0 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boon-data-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Test the pipeline
+        run: uv run --locked python -m unittest discover -s tests -v
+      - name: Publish changed snapshots and update the version index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.ref || 'master' }}
+        run: uv run --locked python scripts/publish.py --ref "$SOURCE_REF" --publish
