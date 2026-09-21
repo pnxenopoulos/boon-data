@@ -499,8 +499,7 @@ uv run --locked python -m unittest discover -s tests -v
 `pyproject.toml` declares dependencies and `uv.lock` pins the resolved versions.
 `uv sync --locked` creates `.venv/` and checks the lockfile without changing it.
 The optional `.python-version` selects Python 3.13 for local runs and releases.
-`requires-python` in `pyproject.toml` declares compatibility with Python 3.11+;
-CI overrides the default to test both 3.11 and 3.13 through `astral-sh/setup-uv`.
+CI uses the same Python 3.13 default on Ubuntu.
 Both workflows pin uv to 0.11.28 and use `uv run --locked`.
 The scripts are a uv virtual project and are not installed as a Python package.
 
@@ -512,8 +511,8 @@ Tests use synthetic source responses and do not access the network. They cover
 KV3/KV1 parsing, identity and localization joins, nullable numeric values,
 modifier context, JSON/Parquet preservation of new fields, checksums, reproducible
 builds, content reuse, publication timestamps, client-version lookup, draft
-recovery, and atomic index updates. CI runs on Linux and Windows with Python
-3.11 and 3.13.
+recovery, and atomic index updates. CI and releases each use one Ubuntu job
+with Python 3.13.
 
 The build scripts are MIT licensed. The upstream game data remains Valve's;
 this repository does not grant a license to Valve's game assets. Source
