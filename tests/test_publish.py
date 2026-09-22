@@ -132,6 +132,70 @@ class PublisherTests(unittest.TestCase):
         )
         self.github = FakeGitHub()
 
+    def legacy_snapshot(self):
+        manifest = json.loads(
+            (Path(self.plan["directory"]) / "manifest.json").read_bytes()
+        )
+        del manifest["artifacts"]["misc.json"]
+        del manifest["files"]["misc.vdata"]
+        del manifest["catalogs"]["json_catalogs"]["misc.json"]
+        del manifest["catalogs"]["vdata_metadata"]["misc.vdata"]
+        manifest["catalogs"]["schema_version"] = 4
+        identity = manifest["snapshot"]
+        identity["catalog_schema_version"] = 4
+        identity["content_sha256"] = pipeline.fingerprint(
+            publish.to_json(
+                {key: manifest[key] for key in ("files", "localization_files")}
+            ).encode()
+        )["sha256"]
+        identity["dataset_sha256"] = pipeline.fingerprint(
+            publish.to_json(
+                {
+                    key: identity[key]
+                    for key in (
+                        "content_sha256",
+                        "generator_sha256",
+                        "catalog_schema_version",
+                    )
+                }
+            ).encode()
+        )["sha256"]
+        return manifest
+
+    def test_legacy_release_remains_readable_in_a_mixed_schema_index(self):
+        manifest = self.legacy_snapshot()
+        tag, record = publish.snapshot_record(publish.to_json(manifest).encode())
+        self.assertEqual(
+            set(record["artifacts"]),
+            {"abilities.json", "heroes.json", "modifiers.json", "manifest.json"},
+        )
+        index = publish.empty_index()
+        index["snapshots"][tag] = record
+        publish.observe(index, SOURCE, tag, latest=True)
+        publish.validate_index(index)
+        mixed = publish.make_plan(
+            source_at(), self.inputs, index, self.output / "mixed", latest=True
+        )
+        self.assertEqual(set(mixed["index"]["snapshots"]), {"1234", "1235"})
+        self.assertIn("misc.json", mixed["index"]["versions"]["1235"]["artifacts"])
+        self.assertNotIn("misc.json", mixed["index"]["versions"]["1234"]["artifacts"])
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            publish.make_plan(
+                SOURCE, self.inputs, index, self.output / "replacement", latest=True
+            )
+
+    def test_misc_is_required_by_new_manifests_and_index_records(self):
+        manifest = json.loads(
+            (Path(self.plan["directory"]) / "manifest.json").read_bytes()
+        )
+        del manifest["artifacts"]["misc.json"]
+        with self.assertRaisesRegex(ValueError, "complete release"):
+            publish.snapshot_record(publish.to_json(manifest).encode())
+        index = copy.deepcopy(self.plan["index"])
+        del index["snapshots"][self.plan["snapshot"]]["artifacts"]["misc.json"]
+        with self.assertRaisesRegex(ValueError, "invalid artifact set"):
+            publish.validate_index(index)
+
     def test_unchanged_inputs_reuse_snapshot_and_record_new_game_version(self):
         source = source_at()
         with patch.object(
@@ -152,12 +216,22 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(plan["index"]["latest"], source["client_version"])
 
     def test_catalog_and_localization_changes_create_new_snapshots(self):
-        for kind in ("vdata", "localization", "property_addition", "property_removal"):
+        for kind in (
+            "vdata",
+            "misc",
+            "localization",
+            "property_addition",
+            "property_removal",
+        ):
             with self.subTest(kind=kind):
                 inputs = copy.deepcopy(self.inputs)
                 if kind == "vdata":
                     inputs[0]["abilities.vdata"] = inputs[0]["abilities.vdata"].replace(
                         b'm_strValue = "13"', b'm_strValue = "14"'
+                    )
+                elif kind == "misc":
+                    inputs[0]["misc.vdata"] = inputs[0]["misc.vdata"].replace(
+                        b"m_valueMax = 70.0", b"m_valueMax = 71.0"
                     )
                 elif kind == "localization":
                     path = next(iter(inputs[1]))
@@ -251,6 +325,7 @@ class PublisherTests(unittest.TestCase):
                 "abilities.json",
                 "heroes.json",
                 "modifiers.json",
+                "misc.json",
                 "manifest.json",
             },
         )
@@ -265,7 +340,7 @@ class PublisherTests(unittest.TestCase):
         lookup.assert_called_once_with(self.plan["snapshot"])
         release = self.github.remote[self.plan["snapshot"]]
         self.assertFalse(release["draft"])
-        self.assertEqual(len(release["assets"]), 4)
+        self.assertEqual(len(release["assets"]), 5)
         self.assertEqual(self.github.latest, self.plan["snapshot"])
 
     def test_release_published_between_lookup_and_refresh_is_not_uploaded(self):

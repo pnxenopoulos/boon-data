@@ -1,0 +1,46 @@
+{
+    generic_data_type = "CEntitySubclassVDataBase"
+    _include = ["scripts/misc/pickups.vdata_inc"]
+    gun_powerup_pickup = {
+        _class = "citadel_pickup_modifier"
+        _base = "citadel_punchable_powerup_base"
+        m_sNameLocString = "gun_powerup_pickup"
+        m_sModifer = subclass: {
+            _class = "modifier_citadel_powerup_gun"
+            _my_subclass_name = "gun_powerup_pickup"
+            m_flDuration = 160.0
+            m_flTimeMin = 5
+            m_flTimeMax = 40
+            m_vecModifierValues = [
+                {m_eModifierValue = "MODIFIER_VALUE_FIRE_RATE" m_valueMin = 12.0 m_valueMax = 35.0},
+                {m_eModifierValue = "MODIFIER_VALUE_AMMO_CLIP_SIZE_PERCENT" m_valueMin = 35.0 m_valueMax = 70.0},
+            ]
+        }
+    }
+    ammo_permanent_pickup = {
+        _class = "citadel_pickup_modifier"
+        m_sNameLocString = "ammo_permanent_pickup_label"
+        m_sModifer = subclass: {
+            _class = "modifier_permanent_pickup"
+            _my_subclass_name = "modifier_permanent_pickup"
+            m_vecScriptValues = [{m_eModifierValue = "MODIFIER_VALUE_AMMO_CLIP_SIZE_PERCENT" m_value = 3}]
+        }
+    }
+    ammo_permanent_pickup_lv2 = {
+        _class = "citadel_pickup_modifier"
+        m_sNameLocString = "ammo_permanent_pickup_label_lv2"
+        m_sModifer = subclass: {
+            _class = "modifier_permanent_pickup"
+            _my_subclass_name = "modifier_permanent_pickup"
+            m_vecScriptValues = [{m_eModifierValue = "MODIFIER_VALUE_AMMO_CLIP_SIZE_PERCENT" m_value = 5}]
+        }
+    }
+    world_spawner = {
+        _not_pickable = 2
+        m_flInitialSpawnTime = 0
+        m_flRespawnTime = -1
+        m_vecPrimaryPickups = [{m_sPickup = "gun_powerup_pickup" m_flPickupWeight = 1.0}]
+        m_FutureField = {nested = [0, false, "preserve me"]}
+        m_Particle = resource_name:"particles/example.vpcf"
+    }
+}

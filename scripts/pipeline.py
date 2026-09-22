@@ -15,14 +15,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
-from catalogs import CATALOG_SCHEMA_VERSION, LOCALIZATION_FILES, build_catalogs
+from catalogs import (
+    CATALOG_SCHEMA_VERSION,
+    LOCALIZATION_FILES,
+    VDATA_FILES,
+    build_catalogs,
+)
 from keyvalues import to_json
 
 SOURCE_REPO = "SteamTracking/GameTracking-Deadlock"
 SOURCE_PATH = "game/citadel/pak01_dir/scripts"
 API_URL = f"https://api.github.com/repos/{SOURCE_REPO}"
 RAW_URL = f"https://raw.githubusercontent.com/{SOURCE_REPO}"
-REQUIRED_FILES = {"abilities.vdata", "heroes.vdata", "modifiers.vdata"}
+REQUIRED_FILES = set(VDATA_FILES)
 
 
 def fetch(url: str) -> bytes:

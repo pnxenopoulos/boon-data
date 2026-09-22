@@ -1,6 +1,9 @@
 "lang" {
     "Language" "english"
     "Tokens" {
+        "gun_powerup_pickup" "Gun"
+        "ammo_permanent_pickup_label" "+3% Max Ammo"
+        "ammo_permanent_pickup_label_lv2" "+5% Max Ammo"
         "upgrade_vampire" "Bullet Lifesteal"
         "upgrade_surging_power" "Vampiric Burst"
         "hero_dynamo:n" "Dynamo"

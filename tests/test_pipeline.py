@@ -110,7 +110,7 @@ class PipelineTests(unittest.TestCase):
             )
         self.assertEqual(
             set(manifest["artifacts"]),
-            {"abilities.json", "heroes.json", "modifiers.json"},
+            {"abilities.json", "heroes.json", "modifiers.json", "misc.json"},
         )
         for name, checksum in manifest["artifacts"].items():
             self.assertEqual(
@@ -162,7 +162,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_missing_required_file_does_not_publish_partial_bundle(self):
         self.entries = [
-            entry for entry in self.entries if entry["name"] != "heroes.vdata"
+            entry for entry in self.entries if entry["name"] != "misc.vdata"
         ]
         with self.assertRaisesRegex(ValueError, "missing required"):
             pipeline.build(SOURCE, self.output)

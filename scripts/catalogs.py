@@ -11,7 +11,8 @@ from pathlib import Path
 import polars as pl
 from keyvalues import parse, to_json, unwrap
 
-CATALOG_SCHEMA_VERSION = 4
+CATALOG_SCHEMA_VERSION = 5
+VDATA_FILES = ("abilities.vdata", "heroes.vdata", "modifiers.vdata", "misc.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
     for name in (
@@ -19,6 +20,7 @@ LOCALIZATION_FILES = tuple(
         "citadel_gc_mod_names",
         "citadel_gc_hero_names",
         "citadel_mods",
+        "citadel_main",
     )
 )
 PROPERTY_SCHEMA = {
@@ -266,10 +268,7 @@ def build_catalogs(
     parquet: bool = False,
 ) -> dict:
     """Write JSON definitions, optionally adding local Parquet exports."""
-    documents = {
-        name: parse(vdata[name].decode("utf-8-sig"))
-        for name in ("abilities.vdata", "heroes.vdata", "modifiers.vdata")
-    }
+    documents = {name: parse(vdata[name].decode("utf-8-sig")) for name in VDATA_FILES}
     roots = {name: definitions(document) for name, document in documents.items()}
     tokens = localization_tokens(localization)
     provenance = {
@@ -354,6 +353,26 @@ def build_catalogs(
         ("base_", "level_"),
     )
 
+    misc_table = frame(
+        [
+            {
+                "misc_name": name,
+                "misc_id": string_token(name),
+                "display_name": tokens.get(definition.get("m_sNameLocString", name)),
+                **definition_fields(definition),
+                **provenance,
+            }
+            for name, definition in roots["misc.vdata"].items()
+        ],
+        {
+            "misc_name": pl.String,
+            "misc_id": pl.UInt32,
+            "display_name": pl.String,
+            **DEFINITION,
+            **PROVENANCE,
+        },
+    )
+
     modifiers = []
 
     def walk(value, path: str, source_file: str, owner: str, root: dict):
@@ -365,6 +384,8 @@ def build_catalogs(
                 if name:
                     ability = owner if source_file == "abilities.vdata" else None
                     hero = owner if source_file == "heroes.vdata" else None
+                    misc = owner if source_file == "misc.vdata" else None
+                    qualified_name = name if is_root else f"{owner}/{name}"
                     bindings = value.get(
                         "m_vecAutoRegisterModifierValueFromAbilityPropertyName", []
                     )
@@ -372,6 +393,8 @@ def build_catalogs(
                         {
                             "modifier_name": name,
                             "modifier_id": string_token(name),
+                            "qualified_modifier_name": qualified_name,
+                            "qualified_modifier_id": string_token(qualified_name),
                             "display_name": tokens.get(name),
                             "source_file": source_file,
                             "definition_path": path,
@@ -379,6 +402,8 @@ def build_catalogs(
                             "ability_id": string_token(ability) if ability else None,
                             "hero_name": hero,
                             "hero_id": root.get("m_HeroID") if hero else None,
+                            "misc_name": misc,
+                            "misc_id": string_token(misc) if misc else None,
                             "is_hidden": boolean(value.get("m_bIsHidden")),
                             "debuff_type": value.get("m_eDebuffType"),
                             "bound_properties": property_rows(
@@ -409,6 +434,8 @@ def build_catalogs(
         {
             "modifier_name": pl.String,
             "modifier_id": pl.UInt32,
+            "qualified_modifier_name": pl.String,
+            "qualified_modifier_id": pl.UInt32,
             "display_name": pl.String,
             "source_file": pl.String,
             "definition_path": pl.String,
@@ -416,6 +443,8 @@ def build_catalogs(
             "ability_id": pl.UInt32,
             "hero_name": pl.String,
             "hero_id": pl.UInt32,
+            "misc_name": pl.String,
+            "misc_id": pl.UInt32,
             "is_hidden": pl.Boolean,
             "debuff_type": pl.String,
             "bound_properties": PROPERTY_TYPE,
@@ -424,10 +453,12 @@ def build_catalogs(
         },
         ("stat_",),
     )
+    check_ids(modifier_table, "qualified_modifier")
     tables = {
         "abilities": ability_table,
         "heroes": hero_table,
         "modifiers": modifier_table,
+        "misc": misc_table,
     }
     if parquet:
         tables["ability_properties"] = ability_property_table(
@@ -443,6 +474,7 @@ def build_catalogs(
                 "ability_properties": "ability",
                 "heroes": "hero",
                 "modifiers": "modifier",
+                "misc": "misc",
             }[name],
         )
         if parquet:
@@ -456,9 +488,12 @@ def build_catalogs(
             identity = {
                 "abilities": ("ability_name", "ability_id", "display_name"),
                 "heroes": ("hero_name", "hero_id", "display_name"),
+                "misc": ("misc_name", "misc_id", "display_name"),
                 "modifiers": (
                     "modifier_name",
                     "modifier_id",
+                    "qualified_modifier_name",
+                    "qualified_modifier_id",
                     "display_name",
                     "source_file",
                     "definition_path",
@@ -466,6 +501,8 @@ def build_catalogs(
                     "ability_id",
                     "hero_name",
                     "hero_id",
+                    "misc_name",
+                    "misc_id",
                 ),
             }[name]
             records = [

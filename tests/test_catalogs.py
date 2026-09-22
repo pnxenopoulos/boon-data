@@ -23,8 +23,7 @@ class CatalogTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.output = Path(temporary.name)
         self.vdata = {
-            name: (FIXTURES / name).read_bytes()
-            for name in ("abilities.vdata", "heroes.vdata", "modifiers.vdata")
+            name: (FIXTURES / name).read_bytes() for name in catalogs.VDATA_FILES
         }
         self.localization = {"english.txt": (FIXTURES / "english.txt").read_bytes()}
         self.metadata = catalogs.build_catalogs(
@@ -34,6 +33,7 @@ class CatalogTests(unittest.TestCase):
         self.properties = pl.read_parquet(self.output / "ability_properties.parquet")
         self.heroes = pl.read_parquet(self.output / "heroes.parquet")
         self.modifiers = pl.read_parquet(self.output / "modifiers.parquet")
+        self.misc = pl.read_parquet(self.output / "misc.parquet")
 
     def test_default_export_contains_only_json_with_unchanged_definitions(self):
         output = self.output / "json-only"
@@ -51,7 +51,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(metadata["json_catalogs"], self.metadata["json_catalogs"])
         self.assertEqual(
             {path.name for path in output.iterdir()},
-            {"abilities.json", "heroes.json", "modifiers.json"},
+            {"abilities.json", "heroes.json", "modifiers.json", "misc.json"},
         )
         for path in output.iterdir():
             self.assertEqual(path.read_bytes(), (self.output / path.name).read_bytes())
@@ -261,7 +261,7 @@ class CatalogTests(unittest.TestCase):
         )
 
     def test_manifest_describes_the_written_schema_and_retains_root_metadata(self):
-        self.assertEqual(self.metadata["schema_version"], 4)
+        self.assertEqual(self.metadata["schema_version"], 5)
         for name, metadata in self.metadata["tables"].items():
             table = pl.read_parquet(self.output / name)
             self.assertEqual(metadata["rows"], table.height)
@@ -278,6 +278,7 @@ class CatalogTests(unittest.TestCase):
         for name, table, identity in (
             ("abilities", self.abilities, ("ability_id",)),
             ("heroes", self.heroes, ("hero_id",)),
+            ("misc", self.misc, ("misc_id",)),
             ("modifiers", self.modifiers, ("source_file", "definition_path")),
         ):
             payload = json.loads((self.output / f"{name}.json").read_text())
@@ -360,3 +361,75 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(catalogs.boolean("1"))
         with self.assertRaisesRegex(ValueError, "unsupported boolean"):
             catalogs.boolean("maybe")
+
+    def test_misc_preserves_temporary_and_permanent_pickup_definitions(self):
+        payload = json.loads((self.output / "misc.json").read_text())
+        self.assertEqual(payload["catalog"], "misc")
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["client_version"], "1234")
+        records = {r["misc_name"]: r for r in payload["records"]}
+        gun = records["gun_powerup_pickup"]
+        self.assertEqual((gun["misc_id"], gun["display_name"]), (201785745, "Gun"))
+        definition = gun["definition"]
+        self.assertEqual(definition["_base"], "citadel_punchable_powerup_base")
+        self.assertEqual(definition["m_sModifer"]["$type"], "subclass")
+        modifier = definition["m_sModifer"]["$value"]
+        self.assertEqual(modifier["m_flDuration"], 160)
+        self.assertEqual((modifier["m_flTimeMin"], modifier["m_flTimeMax"]), (5, 40))
+        self.assertEqual(
+            modifier["m_vecModifierValues"],
+            [
+                {
+                    "m_eModifierValue": "MODIFIER_VALUE_FIRE_RATE",
+                    "m_valueMin": 12.0,
+                    "m_valueMax": 35.0,
+                },
+                {
+                    "m_eModifierValue": "MODIFIER_VALUE_AMMO_CLIP_SIZE_PERCENT",
+                    "m_valueMin": 35.0,
+                    "m_valueMax": 70.0,
+                },
+            ],
+        )
+        ammo = records["ammo_permanent_pickup_lv2"]
+        self.assertEqual(ammo["display_name"], "+5% Max Ammo")
+        self.assertNotIn("m_flDuration", ammo["definition"]["m_sModifer"]["$value"])
+        world = records["world_spawner"]
+        self.assertIsNone(world["display_name"])
+        self.assertNotIn("_class", world["definition"])
+        self.assertEqual(
+            world["definition"]["m_FutureField"]["nested"], [0, False, "preserve me"]
+        )
+        self.assertEqual(world["definition"]["m_flRespawnTime"], -1)
+        self.assertEqual(world["definition"]["m_Particle"]["$type"], "resource_name")
+        self.assertIn("misc.vdata", self.metadata["vdata_metadata"])
+
+    def test_misc_modifiers_keep_pickup_context_and_recorded_qualified_ids(self):
+        payload = json.loads((self.output / "modifiers.json").read_text())
+        rows = {
+            r["misc_name"]: r
+            for r in payload["records"]
+            if r["source_file"] == "misc.vdata"
+        }
+        for owner, identifier in {
+            "gun_powerup_pickup": 2161948557,
+            "ammo_permanent_pickup": 2889034835,
+            "ammo_permanent_pickup_lv2": 2592582493,
+        }.items():
+            row = rows[owner]
+            self.assertEqual(row["qualified_modifier_id"], identifier)
+            self.assertEqual(
+                row["qualified_modifier_name"], f"{owner}/{row['modifier_name']}"
+            )
+            self.assertEqual(row["misc_id"], catalogs.string_token(owner))
+            self.assertEqual(row["definition_path"], f"/{owner}/m_sModifer")
+            self.assertIsNone(row["ability_id"])
+            self.assertIsNone(row["hero_id"])
+        self.assertEqual(
+            rows["ammo_permanent_pickup"]["modifier_id"],
+            rows["ammo_permanent_pickup_lv2"]["modifier_id"],
+        )
+        self.assertNotEqual(
+            rows["ammo_permanent_pickup"]["qualified_modifier_id"],
+            rows["ammo_permanent_pickup_lv2"]["qualified_modifier_id"],
+        )

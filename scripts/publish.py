@@ -28,7 +28,17 @@ ARTIFACTS = {
     "abilities.json",
     "heroes.json",
     "modifiers.json",
+    "misc.json",
 }
+
+
+def artifact_names(schema_version: int) -> set[str]:
+    """Keep pre-misc releases readable while requiring complete new bundles."""
+    if schema_version == 4:
+        return ARTIFACTS - {"misc.json"}
+    if 5 <= schema_version <= pipeline.CATALOG_SCHEMA_VERSION:
+        return ARTIFACTS
+    raise ValueError(f"unsupported catalog schema: {schema_version}")
 
 
 def empty_index() -> dict:
@@ -64,7 +74,9 @@ def validate_index(index: dict, *, published: bool = False) -> dict:
     for record in index["snapshots"].values():
         if published or record["released_at"] is not None:
             published_time(record["released_at"])
-        if set(record["artifacts"]) != ARTIFACTS | {"manifest.json"}:
+        if set(record["artifacts"]) != artifact_names(
+            record["identity"]["catalog_schema_version"]
+        ) | {"manifest.json"}:
             raise ValueError("snapshot index has an invalid artifact set")
     for version, entry in index["versions"].items():
         if (
@@ -91,7 +103,7 @@ def snapshot_record(
         raise ValueError("unsupported snapshot manifest")
     if manifest["source"]["repository"] != pipeline.SOURCE_REPO:
         raise ValueError("unexpected snapshot source repository")
-    if set(manifest["artifacts"]) != ARTIFACTS:
+    if set(manifest["artifacts"]) != artifact_names(identity["catalog_schema_version"]):
         raise ValueError("snapshot manifest does not describe a complete release")
     inputs = {key: manifest[key] for key in ("files", "localization_files")}
     if (
