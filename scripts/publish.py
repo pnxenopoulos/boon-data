@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -257,8 +258,23 @@ class GitHub:
             )
         return result
 
-    def release_command(self, *args: str) -> None:
-        subprocess.run(["gh", "release", *args, "--repo", self.repository], check=True)
+    def upload_asset(self, release_id: int, path: Path) -> None:
+        name = urllib.parse.quote(path.name, safe="")
+        subprocess.run(
+            [
+                "gh",
+                "api",
+                f"https://uploads.github.com/{self.endpoint}/releases/{release_id}/assets?name={name}",
+                "--method",
+                "POST",
+                "--header",
+                "Content-Type: application/json",
+                "--input",
+                str(path),
+                "--silent",
+            ],
+            check=True,
+        )
 
     def asset_bytes(self, asset: dict) -> bytes:
         return subprocess.run(
@@ -386,28 +402,26 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
         }:
             raise ValueError(f"local release artifact changed: {name}")
     if release is None:
-        notes = directory.parent / "release-notes.md"
-        notes.write_text(
-            f"Deadlock ClientVersion {record['client_version']}.\n\n"
-            f"Source: https://github.com/{pipeline.SOURCE_REPO}/commit/{record['source']['commit']}\n\n"
-            f"Content SHA-256: {record['identity']['content_sha256']}\n",
-            encoding="utf-8",
+        release = github.api(
+            "releases",
+            method="POST",
+            data={
+                "tag_name": tag,
+                "target_commitish": target,
+                "draft": True,
+                "make_latest": "false",
+                "name": f"Deadlock {record['client_version']}",
+                "body": (
+                    f"Deadlock ClientVersion {record['client_version']}.\n\n"
+                    f"Source: https://github.com/{pipeline.SOURCE_REPO}/commit/{record['source']['commit']}\n\n"
+                    f"Content SHA-256: {record['identity']['content_sha256']}\n"
+                ),
+            },
         )
-        github.release_command(
-            "create",
-            tag,
-            "--target",
-            target,
-            "--draft",
-            "--latest=false",
-            "--title",
-            f"Deadlock {record['client_version']}",
-            "--notes-file",
-            str(notes),
-        )
-    # A fresh read protects published assets on retries or after a concurrent manual publish.
-    release = github.release(tag)
-    if release is None or not release["draft"]:
+    # Keep the release ID: a new draft may not yet be discoverable by tag.
+    endpoint = f"releases/{release['id']}"
+    release = github.api(endpoint)
+    if not release["draft"]:
         raise ValueError("refusing to upload assets to a non-draft release")
     existing = {asset["name"] for asset in release["assets"]}
     if not existing <= record["artifacts"].keys():
@@ -418,14 +432,12 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
         {"artifacts": {name: record["artifacts"][name] for name in existing}},
         published=False,
     )
-    missing = sorted(record["artifacts"].keys() - existing)
-    if missing:
-        github.release_command(
-            "upload", tag, *(str(directory / name) for name in missing)
-        )
-    verify_release(github, github.release(tag), record, published=False)
-    github.release_command("edit", tag, "--draft=false", "--latest=false")
-    release = github.release(tag)
+    for name in sorted(record["artifacts"].keys() - existing):
+        github.upload_asset(release["id"], directory / name)
+    verify_release(github, github.api(endpoint), record, published=False)
+    release = github.api(
+        endpoint, method="PATCH", data={"draft": False, "make_latest": "false"}
+    )
     verify_release(github, release, record, published=True)
     return release
 
@@ -447,7 +459,14 @@ def publish_plan(
     latest = plan["index"]["latest"]
     if latest is not None:
         tag = plan["index"]["versions"][latest]["snapshot"]
-        github.release_command("edit", tag, "--latest=true")
+        latest_release = release if release["tag_name"] == tag else github.release(tag)
+        if latest_release is None:
+            raise ValueError(f"latest snapshot release is missing: {tag}")
+        github.api(
+            f"releases/{latest_release['id']}",
+            method="PATCH",
+            data={"make_latest": "true"},
+        )
 
 
 def main() -> None:

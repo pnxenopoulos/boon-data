@@ -52,56 +52,62 @@ class FakeGitHub:
     def asset_bytes(self, asset):
         return self.blobs[asset["id"]]
 
-    def release_command(self, *args):
-        self.commands.append(args)
-        operation, tag, *rest = args
-        if operation == "create":
+    def api(self, path, *, method="GET", data=None):
+        if path == "releases" and method == "POST":
+            tag = data["tag_name"]
+            self.commands.append(("create", tag))
             self.remote[tag] = {
+                "id": len(self.remote) + 1,
                 "tag_name": tag,
-                "draft": True,
+                "draft": data["draft"],
                 "prerelease": False,
                 "assets": [],
                 "published_at": None,
-                "name": rest[rest.index("--title") + 1],
+                "name": data["name"],
+                "html_url": "https://github.com/owner/repo/releases/tag/untagged-123",
             }
-        elif operation == "upload":
-            assert self.remote[tag]["draft"]
-            for path in rest:
-                if path.startswith("--"):
-                    continue
-                data = Path(path).read_bytes()
-                if self.corrupt_upload:
-                    data += b"corrupt"
-                asset_id = len(self.blobs) + 1
-                self.blobs[asset_id] = data
-                digest = pipeline.fingerprint(data)
-                assets = self.remote[tag]["assets"]
-                if any(a["name"] == Path(path).name for a in assets):
-                    raise FileExistsError("release asset already exists")
-                assets.append(
-                    {
-                        "name": Path(path).name,
-                        "id": asset_id,
-                        "state": "uploaded",
-                        "size": digest["bytes"],
-                        "digest": "sha256:" + digest["sha256"],
-                    }
-                )
-                if self.fail_upload:
-                    raise OSError("upload interrupted")
-        elif operation == "edit":
-            if "--draft=false" in rest:
-                self.remote[tag]["draft"] = False
-                self.remote[tag]["published_at"] = self.published_at
-            if "--latest=true" in rest:
-                self.latest = tag
+            return copy.deepcopy(self.remote[tag])
+        release = next(r for r in self.remote.values() if path == f"releases/{r['id']}")
+        if method == "PATCH":
+            self.commands.append(("edit", release["tag_name"]))
+            if data.get("draft") is False:
+                release["draft"] = False
+                release["published_at"] = self.published_at
+            if data.get("make_latest") == "true":
+                self.latest = release["tag_name"]
         else:
-            raise AssertionError(args)
+            assert method == "GET"
+        return copy.deepcopy(release)
+
+    def upload_asset(self, release_id, path):
+        release = next(r for r in self.remote.values() if r["id"] == release_id)
+        assert release["draft"]
+        self.commands.append(("upload", release["tag_name"], str(path)))
+        assets = release["assets"]
+        if any(a["name"] == path.name for a in assets):
+            raise FileExistsError("release asset already exists")
+        data = path.read_bytes()
+        if self.corrupt_upload:
+            data += b"corrupt"
+        asset_id = len(self.blobs) + 1
+        self.blobs[asset_id] = data
+        digest = pipeline.fingerprint(data)
+        assets.append(
+            {
+                "name": path.name,
+                "id": asset_id,
+                "state": "uploaded",
+                "size": digest["bytes"],
+                "digest": "sha256:" + digest["sha256"],
+            }
+        )
+        if self.fail_upload:
+            raise OSError("upload interrupted")
 
     def write_index(self, index, previous_sha, target):
         publish.validate_index(index, published=True)
         for tag, record in index["snapshots"].items():
-            publish.verify_release(self, self.release(tag), record, published=True)
+            publish.verify_release(self, self.remote[tag], record, published=True)
         if self.fail_index:
             raise OSError("index update conflict")
         self.writes.append((copy.deepcopy(index), previous_sha, target))
@@ -250,6 +256,37 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.github.index, self.plan["index"])
         self.assertEqual(self.github.latest, self.plan["snapshot"])
 
+    def test_new_draft_is_published_by_id_when_tag_lookup_cannot_find_it(self):
+        # The tag lookup returns no release; creation returns an untagged draft URL.
+        # Any further lookup by tag would reproduce the failed Actions run.
+        with patch.object(self.github, "release", side_effect=[None]) as lookup:
+            publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        lookup.assert_called_once_with(self.plan["snapshot"])
+        release = self.github.remote[self.plan["snapshot"]]
+        self.assertFalse(release["draft"])
+        self.assertEqual(len(release["assets"]), 4)
+        self.assertEqual(self.github.latest, self.plan["snapshot"])
+
+    def test_release_published_between_lookup_and_refresh_is_not_uploaded(self):
+        self.github.fail_upload = True
+        with self.assertRaises(OSError):
+            publish.publish_snapshot(self.github, self.plan, TARGET)
+        self.github.fail_upload = False
+        api = self.github.api
+
+        def publish_before_refresh(path, **kwargs):
+            self.github.remote[self.plan["snapshot"]]["draft"] = False
+            return api(path, **kwargs)
+
+        self.github.commands.clear()
+        with (
+            patch.object(self.github, "api", side_effect=publish_before_refresh),
+            self.assertRaisesRegex(ValueError, "non-draft release"),
+        ):
+            publish.publish_snapshot(self.github, self.plan, TARGET)
+        self.assertEqual(self.github.commands, [])
+        self.assertEqual(self.github.writes, [])
+
     def test_versions_include_publication_time_and_download_metadata(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
         self.assertEqual(self.github.index["schema_version"], 2)
@@ -388,7 +425,6 @@ class PublisherTests(unittest.TestCase):
         }
         for asset in uploaded:
             self.assertEqual(resumed[asset["name"]], asset)
-        self.assertFalse(any("--clobber" in c for c in self.github.commands))
 
     def test_draft_retry_rejects_mismatched_or_unexpected_assets_without_overwriting(
         self,
@@ -511,6 +547,18 @@ class PublisherTests(unittest.TestCase):
                 manifest["snapshot"][f"{kind}_sha256"] = "0" * 64
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 publish.snapshot_record(json.dumps(manifest).encode())
+
+
+class ReleaseApiTests(unittest.TestCase):
+    def test_existing_draft_is_found_when_tag_endpoint_returns_not_found(self):
+        github = publish.GitHub("owner/repo")
+        draft = {"id": 123, "tag_name": "snapshot", "draft": True}
+        github.api = Mock(side_effect=[None, [draft]])
+        self.assertEqual(github.release("snapshot"), draft)
+        self.assertEqual(
+            [call.args[0] for call in github.api.call_args_list],
+            ["releases/tags/snapshot", "releases?per_page=100&page=1"],
+        )
 
 
 class IndexApiTests(unittest.TestCase):
