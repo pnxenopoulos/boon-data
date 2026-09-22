@@ -100,6 +100,8 @@ class PipelineTests(unittest.TestCase):
         directory = pipeline.build(SOURCE, self.output)
         manifest = json.loads((directory / "manifest.json").read_text())
         self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(directory.name, "1234")
+        self.assertEqual(manifest["release_key"], "1234")
         self.assertEqual(set(manifest["files"]), pipeline.REQUIRED_FILES)
         self.assertEqual(manifest["source"]["commit"], SHA)
         for name in pipeline.REQUIRED_FILES:

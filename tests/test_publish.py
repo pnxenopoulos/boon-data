@@ -176,7 +176,11 @@ class PublisherTests(unittest.TestCase):
                         b'AbilityDuration = { m_strValue = "0" }', b""
                     )
                 plan = publish.make_plan(
-                    source_at(), inputs, self.plan["index"], self.output, latest=True
+                    source_at(),
+                    inputs,
+                    self.plan["index"],
+                    self.output / kind,
+                    latest=True,
                 )
                 self.assertEqual(plan["action"], "publish")
                 self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
@@ -201,19 +205,16 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(first["snapshot"], second["snapshot"])
         self.assertNotEqual(first["release_key"], second["release_key"])
 
-    def test_generator_revision_produces_new_tag_for_same_upstream_commit(self):
-        with patch.object(pipeline, "generator_fingerprint", return_value="e" * 64):
-            plan = publish.make_plan(
-                SOURCE, self.inputs, self.plan["index"], self.output, latest=True
-            )
-        self.assertEqual(plan["action"], "publish")
-        self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
-        self.assertEqual(len(plan["index"]["versions"]), 1)
-        self.assertEqual(len(plan["index"]["snapshots"]), 2)
-        self.assertEqual(
-            plan["index"]["versions"][SOURCE["client_version"]]["snapshot"],
-            plan["snapshot"],
-        )
+    def test_generator_revision_cannot_reuse_a_client_version_tag(self):
+        original = copy.deepcopy(self.plan["index"])
+        with (
+            patch.object(pipeline, "generator_fingerprint", return_value="e" * 64),
+            self.assertRaisesRegex(
+                ValueError, "client version 1234.*refusing to overwrite"
+            ),
+        ):
+            publish.make_plan(SOURCE, self.inputs, original, self.output, latest=True)
+        self.assertEqual(original, self.plan["index"])
 
     def test_schema_revision_produces_new_dataset(self):
         revision = catalogs.CATALOG_SCHEMA_VERSION + 1
@@ -222,9 +223,9 @@ class PublisherTests(unittest.TestCase):
             patch.object(catalogs, "CATALOG_SCHEMA_VERSION", revision),
         ):
             plan = publish.make_plan(
-                SOURCE, self.inputs, self.plan["index"], self.output, latest=True
+                source_at(), self.inputs, self.plan["index"], self.output, latest=True
             )
-        self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
+        self.assertEqual(plan["snapshot"], "1235")
 
     def test_manual_backfill_does_not_advance_latest(self):
         plan = publish.make_plan(
@@ -296,7 +297,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(entry["released_at"], PUBLISHED_AT)
         self.assertNotEqual(entry["released_at"], entry["source"]["committed_at"])
         release = self.github.release(entry["snapshot"])
-        self.assertEqual(release["name"], "Deadlock 1234")
+        self.assertEqual(release["name"], "boon-data-1234")
         for name, asset in entry["artifacts"].items():
             self.assertEqual(
                 asset["url"],
@@ -357,30 +358,34 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertEqual(backfill["index"], plan["index"])
 
-    def test_correction_updates_one_version_and_recovers_independent_of_release_order(
-        self,
-    ):
+    def test_changed_inputs_cannot_overwrite_same_client_version(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
         original = copy.deepcopy(self.github.index)
-        with patch.object(pipeline, "generator_fingerprint", return_value="e" * 64):
-            correction = publish.make_plan(
-                SOURCE, self.inputs, original, self.output, latest=True
+        remote = copy.deepcopy(self.github.remote)
+        changed = copy.deepcopy(self.inputs)
+        changed[0]["abilities.vdata"] += b"\n// changed catalog input"
+        with self.assertRaisesRegex(
+            ValueError, "client version 1234.*refusing to overwrite"
+        ):
+            publish.make_plan(
+                source_at(version="1234"), changed, original, self.output, latest=True
             )
-        self.github.published_at = "2026-09-22T16:00:00Z"
-        publish.publish_plan(self.github, correction, original, "sha", TARGET)
-        entry = self.github.index["versions"]["1234"]
-        self.assertEqual(entry["released_at"], self.github.published_at)
-        self.assertNotEqual(entry["snapshot"], original["versions"]["1234"]["snapshot"])
-        self.assertEqual(len(self.github.index["snapshots"]), 2)
-        releases = self.github.releases()
-        for ordered in (releases, list(reversed(releases))):
-            with patch.object(self.github, "releases", return_value=ordered):
-                recovered = publish.recover_snapshots(
-                    self.github, publish.empty_index()
-                )
-            self.assertEqual(recovered["versions"]["1234"], entry)
-        recovered = publish.recover_snapshots(self.github, original)
-        self.assertEqual(recovered["versions"]["1234"], entry)
+        self.assertEqual(self.github.index, original)
+        self.assertEqual(self.github.remote, remote)
+
+    def test_historical_hash_manifest_keeps_its_original_download_urls(self):
+        manifest = json.loads(
+            (Path(self.plan["directory"]) / "manifest.json").read_bytes()
+        )
+        legacy = f"1234-{SOURCE['source']['commit'][:12]}-r{manifest['snapshot']['dataset_sha256'][:12]}"
+        manifest["release_key"] = legacy
+        tag, record = publish.snapshot_record(json.dumps(manifest).encode())
+        self.assertEqual(tag, legacy)
+        for asset in record["artifacts"].values():
+            self.assertIn(f"/releases/download/{legacy}/", asset["url"])
+        manifest["release_key"] = "5678"
+        with self.assertRaisesRegex(ValueError, "release tag does not match"):
+            publish.snapshot_record(json.dumps(manifest).encode())
 
     def test_index_rejects_version_keys_and_metadata_that_disagree(self):
         for kind in ("version", "timestamp", "artifacts"):

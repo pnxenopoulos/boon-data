@@ -111,7 +111,7 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
     return {
         **source,
         "schema_version": 2,
-        "release_key": f"{source['client_version']}-{source['source']['commit'][:12]}-r{dataset_hash[:12]}",
+        "release_key": source["client_version"],
         "files": files,
         "localization_files": localization_files,
         "snapshot": {**identity, "dataset_sha256": dataset_hash},

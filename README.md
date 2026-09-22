@@ -46,16 +46,16 @@ The pipeline:
 7. Writes `manifest.json` with provenance, game identifiers, catalog schemas
    and record counts, and SHA-256 hashes for every input and output file.
 
-Release tags include the source game version, upstream commit prefix, and a
-dataset revision: `<ClientVersion>-<commit-prefix>-r<dataset-prefix>`. Full
-SHA-256 fingerprints and the full upstream SHA are recorded in the manifest.
-The dataset revision covers the shipped inputs, catalog schema version, and
-generator code/writer revision. A catalog correction can therefore produce a
-new immutable release for the same upstream commit.
+Release tags are the Deadlock **ClientVersion**, for example `6698`, with the
+GitHub release title **boon-data-6698**. The release URL is
+`https://github.com/pnxenopoulos/boon-data/releases/tag/6698`.
+Full SHA-256 fingerprints and the full upstream commit SHA remain in the
+manifest for provenance and verification; they are not part of the tag.
 
-The GitHub release title is **Deadlock 6698**, for example. Users select client
-version `6698` through `versions.json`; the longer tag is an internal immutable
-identifier. Both hash prefixes have 12 hexadecimal characters.
+A client-version tag cannot hold two different snapshots. If catalog inputs,
+generator code, or schema change for an already released version, publication
+fails without replacing its assets. Historical hash-tagged releases and their
+index records remain readable.
 
 The publisher compares content fingerprints before building. A new game version
 with identical inputs reuses an existing snapshot and only updates the version
@@ -296,7 +296,7 @@ The JSON-only manifest has `schema_version: 2`:
 | Field | Meaning |
 | --- | --- |
 | `source_key` | Observed source identity, `<ClientVersion>-<commit-prefix>` |
-| `release_key` | Immutable release tag, `<source_key>-r<dataset-prefix>` |
+| `release_key` | Release tag, equal to `client_version` (for example, `6698`) |
 | `source.repository` | `SteamTracking/GameTracking-Deadlock` |
 | `source.commit` | Full upstream commit SHA |
 | `source.committed_at` | Upstream committer timestamp, used to prevent older observations replacing newer ones |
@@ -319,10 +319,10 @@ The JSON-only manifest has `schema_version: 2`:
 Identifiers are strings; unavailable optional `steam.inf` fields are `null`.
 There is no inferred Steam build ID or demo build mapping. Packaging timestamps
 are omitted so rebuilding the same source with the same toolchain produces the
-same artifacts. Dataset revision tags allow multiple generator revisions of a
-source snapshot to coexist. Manifest schema `2` replaces the earlier raw-archive
-contract. The publication timestamp lives in the version index, where it is
-recorded after GitHub publishes the verified release. Published assets are
+same artifacts. Each client-version tag identifies one immutable snapshot.
+Manifest schema `2` replaces the earlier raw-archive contract. The publication
+timestamp lives in the version index, where it is recorded after GitHub publishes
+the verified release. Published assets are
 never replaced.
 
 ## Publishing and change detection
@@ -390,8 +390,8 @@ Run workflow**. Select the default branch for the workflow code and leave the
 upstream `ref` input as `master`, or enter an upstream branch, tag, or commit to
 build a specific snapshot. The same content checks apply to manual runs, so an
 unchanged dataset reuses the existing release. Manual runs never overwrite
-published assets. If inputs or the generator change, the publisher creates a
-new immutable revision. Interrupted drafts resume by verifying existing assets
+published assets. Changed inputs or generator revisions require an unused
+client-version tag. Interrupted drafts resume by verifying existing assets
 and uploading only missing files; mismatched assets fail instead of being replaced.
 
 The equivalent GitHub CLI command is:
@@ -442,12 +442,11 @@ separate. JSON files and their manifest retain the snapshot's original client
 version and source commit. Consumers should use the index to resolve the
 requested client version, rather than require it to match the snapshot's origin.
 
-There is one current entry per client version. A newer upstream commit for the
-same version updates that entry. A catalog correction creates a new immutable
-snapshot and updates the entry's URLs, checksums, and publication timestamp.
-Earlier snapshots remain in `snapshots` and earlier mappings in the index's Git
-history. Recovery selects the newer source observation, then the later publication
-for corrections to the same observation, independent of the release listing order.
+There is one current entry per client version. An unchanged dataset can update
+its source observation without changing release assets. A different dataset
+cannot replace an existing client-version tag. Existing snapshots remain in
+`snapshots`, including historical hash-tagged releases, and earlier mappings
+remain in the index's Git history.
 
 ```python
 import json
@@ -482,7 +481,7 @@ boon versions --local  # inspect the local cache without network access
 
 The intended cache is `~/.boon/<client-version>/`, containing `abilities.json`,
 `heroes.json`, `modifiers.json`, and `manifest.json`. The index provides the exact
-URLs and checksums needed to verify those downloads and detect catalog corrections.
+URLs and checksums needed to verify those downloads.
 These commands and the new cache layout are not implemented by this repository.
 
 **A release's `ClientVersion` is not `demo.build`.** Matching a replay's header

@@ -22,7 +22,8 @@ from keyvalues import to_json
 DEFAULT_REPOSITORY = "pnxenopoulos/boon-data"
 INDEX_BRANCH = "data-index"
 INDEX_FILE = "versions.json"
-RELEASE_TAG = re.compile(r"[0-9]+-[0-9a-f]{12}-r[0-9a-f]{12}")
+# Accept historical tags when recovering previously published releases.
+RELEASE_TAG = re.compile(r"[0-9]+(?:-[0-9a-f]{12}-r[0-9a-f]{12})?")
 ARTIFACTS = {
     "abilities.json",
     "heroes.json",
@@ -109,7 +110,7 @@ def snapshot_record(
     ):
         raise ValueError("invalid dataset fingerprint")
     expected_tag = f"{manifest['client_version']}-{manifest['source']['commit'][:12]}-r{dataset[:12]}"
-    if tag != expected_tag:
+    if tag not in (manifest["client_version"], expected_tag):
         raise ValueError("release tag does not match the snapshot identity")
     artifacts = {**manifest["artifacts"], "manifest.json": pipeline.fingerprint(data)}
     for item in artifacts.values():
@@ -191,6 +192,11 @@ def make_plan(
     )
     directory = None
     if tag is None:
+        if metadata["release_key"] in index["snapshots"]:
+            raise ValueError(
+                f"client version {source['client_version']} already has a different "
+                "snapshot; refusing to overwrite its release"
+            )
         directory = pipeline.build(source, output, inputs=inputs)
         tag, record = snapshot_record(
             (directory / "manifest.json").read_bytes(), repository
@@ -410,7 +416,7 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
                 "target_commitish": target,
                 "draft": True,
                 "make_latest": "false",
-                "name": f"Deadlock {record['client_version']}",
+                "name": f"boon-data-{record['client_version']}",
                 "body": (
                     f"Deadlock ClientVersion {record['client_version']}.\n\n"
                     f"Source: https://github.com/{pipeline.SOURCE_REPO}/commit/{record['source']['commit']}\n\n"
