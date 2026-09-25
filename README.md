@@ -51,9 +51,10 @@ GitHub release title **boon-data-6698**. The release URL is
 Full SHA-256 fingerprints and the full upstream commit SHA remain in the
 manifest for provenance and verification; they are not part of the tag.
 
-A client-version tag cannot hold two different snapshots. If catalog inputs or
-generator code change for an already released version, publication fails without
-replacing its assets.
+A client-version tag cannot hold two different snapshots. Rerunning an existing
+version with identical VData and localization inputs verifies and reuses its
+published files, even if the generator has changed. Different source content for
+an already released version fails without replacing its assets.
 
 The publisher compares content fingerprints before building. A new game version
 with identical inputs reuses an existing snapshot and only updates the version
@@ -444,7 +445,7 @@ The JSON definitions retain these source fields without resolving them.
 | `release_key` | Release tag, equal to `client_version` (for example, `6698`) |
 | `source.repository` | `SteamTracking/GameTracking-Deadlock` |
 | `source.commit` | Full upstream commit SHA |
-| `source.committed_at` | Upstream committer timestamp, used to prevent older observations replacing newer ones |
+| `source.committed_at` | Upstream committer timestamp; automatic runs keep the newest observation |
 | `source.path` | Source VData directory |
 | `client_version`, `server_version` | Values from `steam.inf` |
 | `source_revision` | Engine source revision from `steam.inf` |
@@ -493,8 +494,9 @@ supports manual runs with an upstream `ref`. Both use
    snapshot, without creating a release or re-uploading assets.
 7. Commit the index atomically to `data-index/versions.json`, using the previous
    file SHA to reject conflicting updates. Runs against `master` update `latest`
-   to the client version; explicit historical refs do not advance it. Older
-   observations cannot replace a newer commit for the same client version.
+   to the client version; explicit historical refs do not advance it. Automatic
+   runs retain the newest observation; backfills replace the selected version's
+   observation with the requested commit's metadata.
 
 The gate compares file contents, not upstream commit IDs. Localization-only,
 metadata-only, generator, lockfile, and lint-tool updates do not trigger
@@ -570,15 +572,22 @@ gh workflow run backfill.yml --repo pnxenopoulos/boon-data \
   -f source_commit="<full-upstream-commit-sha>"
 ```
 
-The backfill workflow deliberately omits `--vdata-only`: it matches content and
-generator fingerprints for the requested historical snapshot. It reads
+The backfill workflow deliberately omits `--vdata-only`: it compares all VData and
+localization inputs. An existing client version with matching inputs reuses its
+published snapshot across generator updates. For a new version, reuse requires
+matching both content and generator fingerprints. It reads
 `steam.inf`, all four VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
 source commit, client version, build date/time, and publication time in the index.
 New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
 Identical datasets reuse an existing snapshot; the historical client version is
-still added to `versions.json`. Neither the index's `latest` nor GitHub's latest
-release changes. Existing releases are never overwritten: rerunning the same
-snapshot verifies and reuses it, while different data for an already-published
+added to or replaced in `versions.json`. A backfill replaces that client version's
+entry with the selected commit, source revision, and build date/time, even when an
+existing entry points to a newer commit. The updated file is written to the
+`data-index` branch after release verification. Other versions, snapshot metadata,
+and the `latest` pointer are preserved. An unchanged index needs no new commit.
+Existing releases are never overwritten: rerunning the same
+source content verifies and reuses the published files; it does not regenerate
+them with newer code. Different source content for an already-published
 client-version tag fails. Missing historical inputs also fail instead of using
 current files.
 

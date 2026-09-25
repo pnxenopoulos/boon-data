@@ -122,12 +122,15 @@ def snapshot_record(
 
 
 def observe(index: dict, source: dict, tag: str, *, latest: bool) -> None:
-    """Record an observed version separately from the snapshot's original provenance."""
+    """Refresh the selected version; automatic observations cannot move backwards."""
     version = source["client_version"]
     existing = index["versions"].get(version)
-    if existing is not None and datetime.fromisoformat(
-        source["source"]["committed_at"]
-    ) < datetime.fromisoformat(existing["source"]["committed_at"]):
+    if (
+        latest
+        and existing is not None
+        and datetime.fromisoformat(source["source"]["committed_at"])
+        < datetime.fromisoformat(existing["source"]["committed_at"])
+    ):
         return
     entry = {
         key: source.get(key)
@@ -173,14 +176,26 @@ def make_plan(
     metadata = pipeline.snapshot_metadata(source, *inputs)
     index = copy.deepcopy(index)
     dataset = metadata["snapshot"]["dataset_sha256"]
-    tag = next(
-        (
-            tag
-            for tag, record in sorted(index["snapshots"].items())
-            if record["identity"]["dataset_sha256"] == dataset
-        ),
-        None,
+    # Preserve an existing version's published files across generator changes.
+    tag = (
+        index["versions"]
+        .get(source["client_version"], {})
+        .get("snapshot", metadata["release_key"])
     )
+    record = index["snapshots"].get(tag)
+    if (
+        record is None
+        or record["identity"]["content_sha256"]
+        != metadata["snapshot"]["content_sha256"]
+    ):
+        tag = next(
+            (
+                tag
+                for tag, record in sorted(index["snapshots"].items())
+                if record["identity"]["dataset_sha256"] == dataset
+            ),
+            None,
+        )
     if vdata_only and index["versions"]:
         previous = index["latest"] or max(
             index["versions"],
@@ -194,8 +209,8 @@ def make_plan(
     if tag is None:
         if metadata["release_key"] in index["snapshots"]:
             raise ValueError(
-                f"client version {source['client_version']} already has a different "
-                "snapshot; refusing to overwrite its release"
+                f"client version {source['client_version']} already has different "
+                "source content; refusing to overwrite its release"
             )
         directory = pipeline.build(source, output, inputs=inputs)
         tag, record = snapshot_record(

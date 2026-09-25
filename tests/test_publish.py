@@ -356,16 +356,65 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(first["snapshot"], second["snapshot"])
         self.assertNotEqual(first["release_key"], second["release_key"])
 
-    def test_generator_revision_cannot_reuse_a_client_version_tag(self):
-        original = copy.deepcopy(self.plan["index"])
+    def test_backfill_reuses_published_content_after_a_generator_change(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        original = copy.deepcopy(self.github.index)
+        remote = copy.deepcopy(self.github.remote)
+        self.github.commands.clear()
         with (
             patch.object(pipeline, "generator_fingerprint", return_value="e" * 64),
-            self.assertRaisesRegex(
-                ValueError, "client version 1234.*refusing to overwrite"
+            patch.object(
+                pipeline, "build", side_effect=AssertionError("must not rebuild")
             ),
         ):
-            publish.make_plan(SOURCE, self.inputs, original, self.output, latest=True)
-        self.assertEqual(original, self.plan["index"])
+            plan = publish.make_plan(
+                SOURCE, self.inputs, original, self.output, latest=False
+            )
+        self.assertEqual(plan["action"], "reuse")
+        self.assertEqual(plan["snapshot"], "1234")
+        self.assertIsNone(plan["directory"])
+        self.assertEqual(plan["index"], original)
+        publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(self.github.index, original)
+        self.assertEqual(self.github.remote, remote)
+        self.assertFalse(
+            any(c[0] in ("create", "upload") for c in self.github.commands)
+        )
+        self.assertEqual(len(self.github.writes), 1)
+
+        self.github.remote["1234"]["assets"].pop()
+        with self.assertRaisesRegex(ValueError, "complete artifact set"):
+            publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(len(self.github.writes), 1)
+
+    def test_generator_change_reuses_a_versions_shared_snapshot(self):
+        shared = publish.make_plan(
+            source_at(), self.inputs, self.plan["index"], self.output, latest=True
+        )
+        self.assertEqual(shared["index"]["versions"]["1235"]["snapshot"], "1234")
+        with (
+            patch.object(pipeline, "generator_fingerprint", return_value="e" * 64),
+            patch.object(
+                pipeline, "build", side_effect=AssertionError("must not rebuild")
+            ),
+        ):
+            plan = publish.make_plan(
+                source_at(), self.inputs, shared["index"], self.output, latest=False
+            )
+        self.assertEqual(plan["action"], "reuse")
+        self.assertEqual(plan["snapshot"], "1234")
+        self.assertEqual(plan["index"], shared["index"])
+
+    def test_new_version_uses_the_current_generator(self):
+        with patch.object(pipeline, "generator_fingerprint", return_value="e" * 64):
+            plan = publish.make_plan(
+                source_at(), self.inputs, self.plan["index"], self.output, latest=False
+            )
+        self.assertEqual(plan["action"], "publish")
+        self.assertEqual(plan["snapshot"], "1235")
+        self.assertEqual(
+            plan["index"]["snapshots"]["1235"]["identity"]["generator_sha256"], "e" * 64
+        )
 
     def test_manual_backfill_does_not_advance_latest(self):
         plan = publish.make_plan(
@@ -568,34 +617,85 @@ class PublisherTests(unittest.TestCase):
         self.assertNotEqual(newer["source"]["commit"], older["source"]["commit"])
         self.assertEqual(self.github.index["latest"], "1235")
 
-    def test_newer_commit_updates_same_client_version_and_backfill_cannot_revert_it(
-        self,
-    ):
+    def test_automatic_observations_cannot_revert_a_newer_source_commit(self):
         newer = source_at(version="1234")
         plan = publish.make_plan(
             newer, self.inputs, self.plan["index"], self.output, latest=True
         )
         self.assertEqual(set(plan["index"]["versions"]), {"1234"})
         self.assertEqual(plan["index"]["versions"]["1234"]["source"], newer["source"])
-        backfill = publish.make_plan(
-            SOURCE, self.inputs, plan["index"], self.output, latest=False
+        older = publish.make_plan(
+            SOURCE, self.inputs, plan["index"], self.output, latest=True
         )
-        self.assertEqual(backfill["index"], plan["index"])
+        self.assertEqual(older["index"], plan["index"])
+
+    def test_backfill_replaces_only_the_selected_versions_observation(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        expected = copy.deepcopy(self.github.index["versions"]["1234"])
+        newer = source_at(version="1234")
+        newer.update(
+            source_revision="newer-revision",
+            version_date="Sep 19 2026",
+            version_time="12:00:00",
+        )
+        plan = publish.make_plan(
+            newer, self.inputs, self.github.index, self.output, latest=True
+        )
+        publish.publish_plan(self.github, plan, self.github.index, "sha1", TARGET)
+        plan = publish.make_plan(
+            source_at(commit="c", date="2026-09-20T12:00:00Z"),
+            self.inputs,
+            self.github.index,
+            self.output,
+            latest=True,
+        )
+        publish.publish_plan(self.github, plan, self.github.index, "sha2", TARGET)
+        original = copy.deepcopy(self.github.index)
+        remote = copy.deepcopy(self.github.remote)
+        self.github.commands.clear()
+
+        backfill = publish.make_plan(
+            SOURCE, self.inputs, original, self.output, latest=False
+        )
+        self.assertEqual(backfill["action"], "reuse")
+        publish.publish_plan(self.github, backfill, original, "sha3", TARGET)
+        self.assertEqual(self.github.index["versions"]["1234"], expected)
+        self.assertEqual(
+            self.github.index["versions"]["1235"], original["versions"]["1235"]
+        )
+        self.assertEqual(self.github.index["snapshots"], original["snapshots"])
+        self.assertEqual(self.github.index["latest"], "1235")
+        self.assertEqual(self.github.remote, remote)
+        self.assertEqual(len(self.github.writes), 4)
+        self.assertEqual(self.github.writes[-1][1], "sha3")
+        self.assertFalse(
+            any(c[0] in ("create", "upload") for c in self.github.commands)
+        )
+        self.assertEqual(original["versions"]["1234"]["source"], newer["source"])
 
     def test_changed_inputs_cannot_overwrite_same_client_version(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
         original = copy.deepcopy(self.github.index)
         remote = copy.deepcopy(self.github.remote)
-        changed = copy.deepcopy(self.inputs)
-        changed[0]["abilities.vdata"] += b"\n// changed catalog input"
-        with self.assertRaisesRegex(
-            ValueError, "client version 1234.*refusing to overwrite"
-        ):
-            publish.make_plan(
-                source_at(version="1234"), changed, original, self.output, latest=True
-            )
-        self.assertEqual(self.github.index, original)
-        self.assertEqual(self.github.remote, remote)
+        for group, name in ((0, "abilities.vdata"), (1, next(iter(self.inputs[1])))):
+            changed = copy.deepcopy(self.inputs)
+            changed[group][name] += b"\n// changed source input"
+            with (
+                self.subTest(file=name),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "client version 1234.*different source content.*refusing",
+                ),
+            ):
+                publish.make_plan(
+                    source_at(version="1234"),
+                    changed,
+                    original,
+                    self.output,
+                    latest=True,
+                )
+            self.assertEqual(self.github.index, original)
+            self.assertEqual(self.github.remote, remote)
 
     def test_manifest_tag_must_equal_the_client_version(self):
         manifest = json.loads(
