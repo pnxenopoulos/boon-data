@@ -29,10 +29,10 @@ def source_at(commit="b", version="1235", date="2026-09-19T12:00:00Z"):
     return source
 
 
-class FakeGitHub:
+class FakeGitHub(publish.GitHub):
     def __init__(self):
-        self.repository = publish.DEFAULT_REPOSITORY
-        self.published_at = PUBLISHED_AT
+        super().__init__(publish.DEFAULT_REPOSITORY)
+        self.published_at: str | None = PUBLISHED_AT
         self.remote = {}
         self.blobs = {}
         self.index = publish.empty_index()
@@ -52,8 +52,9 @@ class FakeGitHub:
     def asset_bytes(self, asset):
         return self.blobs[asset["id"]]
 
-    def api(self, path, *, method="GET", data=None):
+    def api(self, path, *, method="GET", data=None, missing_ok=False):
         if path == "releases" and method == "POST":
+            assert data is not None
             tag = data["tag_name"]
             self.commands.append(("create", tag))
             self.remote[tag] = {
@@ -69,6 +70,7 @@ class FakeGitHub:
             return copy.deepcopy(self.remote[tag])
         release = next(r for r in self.remote.values() if path == f"releases/{r['id']}")
         if method == "PATCH":
+            assert data is not None
             self.commands.append(("edit", release["tag_name"]))
             if data.get("draft") is False:
                 release["draft"] = False
@@ -314,6 +316,37 @@ class PublisherTests(unittest.TestCase):
             latest=True,
         )
         self.assertEqual(plan["index"]["latest"], SOURCE["client_version"])
+
+    def test_backfill_publishes_older_data_without_changing_latest_and_can_repeat(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        original = copy.deepcopy(self.github.index)
+        source = source_at(version="1233", date="2026-09-17T12:00:00Z")
+        inputs = copy.deepcopy(self.inputs)
+        inputs[0]["abilities.vdata"] = inputs[0]["abilities.vdata"].replace(
+            b'm_strValue = "13"', b'm_strValue = "12"'
+        )
+        plan = publish.make_plan(source, inputs, original, self.output, latest=False)
+        self.assertEqual(plan["action"], "publish")
+        publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(self.github.index["latest"], "1234")
+        self.assertEqual(self.github.latest, "1234")
+        self.assertEqual(
+            self.github.index["versions"]["1234"], original["versions"]["1234"]
+        )
+        self.assertEqual(
+            self.github.index["versions"]["1233"]["source"], source["source"]
+        )
+        self.assertEqual(len(self.github.release("1233")["assets"]), 5)
+        self.assertFalse(self.github.release("1233")["draft"])
+
+        index = copy.deepcopy(self.github.index)
+        uploads = [c for c in self.github.commands if c[0] == "upload"]
+        plan = publish.make_plan(source, inputs, index, self.output, latest=False)
+        self.assertEqual(plan["action"], "reuse")
+        publish.publish_plan(self.github, plan, index, "sha", TARGET)
+        self.assertEqual(self.github.index, index)
+        self.assertEqual(self.github.latest, "1234")
+        self.assertEqual([c for c in self.github.commands if c[0] == "upload"], uploads)
 
     def test_complete_release_is_verified_before_index_commit(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)

@@ -97,7 +97,7 @@ source definitions as nested JSON objects, together with IDs and English names:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "catalog": "abilities",
   "source_commit": "<full upstream SHA>",
   "client_version": "6698",
@@ -116,7 +116,8 @@ source definitions as nested JSON objects, together with IDs and English names:
 }
 ```
 
-This example is abbreviated; actual definitions retain every parsed field.
+This example is abbreviated; actual files also include lookup indexes and record links,
+and definitions retain every parsed field.
 Modifier JSON records additionally carry their source file, definition path,
 and owning ability/hero/misc identity. `modifier_id` preserves the unqualified
 name token. `qualified_modifier_name` and `qualified_modifier_id` also identify
@@ -136,9 +137,102 @@ from pathlib import Path
 
 snapshot = Path(".work/dist/<release-key>")
 abilities = json.loads((snapshot / "abilities.json").read_text(encoding="utf-8"))
-leech = next(r for r in abilities["records"] if r["ability_name"] == "upgrade_damage_recycler")
+leech = next(
+    r for r in abilities["records"] if r["ability_name"] == "upgrade_damage_recycler"
+)
 print(leech["definition"]["m_mapAbilityProperties"]["BulletLifestealPercent"])
 ```
+
+### Lookups and declared stat changes
+
+Catalog schema **6** uses JSON envelope schema **2**, keeping the same four catalog
+files and the original `records` arrays and `definition` objects. Each record now
+has a `record_key`, `source_file`, and `definition_path`. A record key combines the
+source file and logical definition path, for example
+`abilities.vdata#/upgrade_vampire`. Path segments escape `~` as `~0` and `/` as
+`~1`; KV3 `$type`/`$value` wrappers are transparent in these logical paths.
+Record keys identify a definition location within a snapshot, not a live entity.
+
+Every catalog has these `indexes`:
+
+| Index | Key | Value |
+| --- | --- | --- |
+| `by_id` | Decimal ID string | List of positions in `records` |
+| `by_name` | Internal name | List of positions in `records` |
+| `by_key` | Unique `record_key` | One position in `records` |
+| `by_qualified_id` (modifiers only) | Decimal owner-qualified ID string | List of positions in `records` |
+| `by_qualified_name` (modifiers only) | Owner-qualified modifier name | List of positions in `records` |
+
+ID and name indexes always return lists. Shared modifier names and even repeated
+owner-qualified names can refer to different definition paths. Keep all candidates
+and use the replay's owning ability/hero and context to distinguish them; do not
+silently choose the first match. Missing keys mean no match in this snapshot.
+Different names colliding on one hash fail the build. Never mix record positions
+or references from different snapshots. Hero IDs still come from `m_HeroID`,
+not from hashing the hero name.
+
+Ability records expose `properties`, keyed by property name, and `modifier_keys`
+linking to their embedded modifier records. Each property contains its numeric
+`value` when it is a finite scalar literal, original `raw_value`, declared `stat`
+(`m_eProvidedPropertyType`), usage flags, display units, original `scaling`
+definition, source record/path, and the `modifier_keys` explicitly bound to it.
+Zero stays zero; missing values, expressions, and lists of tier values are not
+coerced to numbers. Other source fields remain in the original `definition`.
+
+Modifier records expose `property_bindings`. Each binding identifies the source
+record and property name, with `status: "resolved"` and a `property` object when
+the owning definition declares it. Otherwise it has `status: "unresolved"` and
+`property: null`. Resolution means the property was found; its `stat` or numeric
+`value` can still be null. No inheritance or engine defaults are inferred.
+Root hero, misc, and standalone modifier records also link to their embedded
+modifiers through `modifier_keys`.
+
+Records expose `stat_changes` for explicit declarations:
+
+- `kind: "ability_property"`: an ability property with a declared stat mapping,
+  including its scaling and bound modifier keys.
+- `kind: "bound_property"`: a modifier's explicitly bound property with a declared
+  stat mapping, including its value and scaling from the owning definition.
+- `kind: "m_vecScriptValues"`: direct modifier stat/value entries.
+- `kind: "m_vecModifierValues"`: direct modifier stat ranges, preserving separate
+  `value_min` and `value_max`; no point within the range is chosen.
+
+Each entry retains its source record and definition path. Direct entries also
+retain their original `definition`. These are declarations, not calculated or
+necessarily active bonuses. The ability property and its bound modifier describe
+the same source effect: do not sum them together. A record's own `stat_changes`
+does not include changes from its embedded modifiers; follow `modifier_keys`.
+Values retain source units (for example, `13` percent stays `13`, not `0.13`).
+Activation conditions, duration parameters, upgrade tiers, and any additional
+fields remain in `definition`. Empty `stat_changes` does **not** establish that a
+modifier has no effects: engine-defined effects and unresolved bindings are not
+converted into invented stat mappings. Hero starting stats, level/purchase bonuses,
+and scaling remain under the corresponding maps in the hero's `definition`.
+
+```python
+import json
+from pathlib import Path
+
+snapshot = Path(".work/lookup-preview/6698")
+abilities = json.loads((snapshot / "abilities.json").read_text())
+modifiers = json.loads((snapshot / "modifiers.json").read_text())
+
+# An ability/item ID from the replay: Bullet Lifesteal.
+for position in abilities["indexes"]["by_id"].get("499683006", []):
+    ability = abilities["records"][position]
+    for key in ability["modifier_keys"]:
+        modifier = modifiers["records"][modifiers["indexes"]["by_key"][key]]
+        print(modifier["qualified_modifier_name"], modifier["stat_changes"])
+
+# An owner-qualified modifier ID from the replay; retain every candidate.
+positions = modifiers["indexes"]["by_qualified_id"].get("1373598984", [])
+candidates = [modifiers["records"][position] for position in positions]
+```
+
+Older JSON schema 1 snapshots remain downloadable and have no indexes or extracted
+bindings. Published releases remain immutable; the new schema requires a new,
+unused client-version release. Local previews can be rebuilt in a new output
+folder without changing existing releases.
 
 ### misc.json
 
@@ -316,18 +410,30 @@ import polars as pl
 snapshot = Path(".work/parquet/<release-key>")
 abilities = pl.scan_parquet(snapshot / "abilities.parquet")
 items = abilities.filter(pl.col("is_item") & ~pl.col("is_template"))
-print(items.select(
-    "ability_name", "ability_id", "display_name", "disabled",
-    "stat_BulletLifestealPercent", "stat_AbilityDuration",
-).collect())
+print(
+    items.select(
+        "ability_name",
+        "ability_id",
+        "display_name",
+        "disabled",
+        "stat_BulletLifestealPercent",
+        "stat_AbilityDuration",
+    ).collect()
+)
 
 properties = pl.scan_parquet(snapshot / "ability_properties.parquet")
-print(properties.filter(
-    pl.col("provided_property") == "MODIFIER_VALUE_BULLET_LIFESTEAL"
-).select(
-    "ability_name", "property_name", "value", "scaling_stat",
-    "scaling_coefficient", "modifier_bindings",
-).collect())
+print(
+    properties.filter(pl.col("provided_property") == "MODIFIER_VALUE_BULLET_LIFESTEAL")
+    .select(
+        "ability_name",
+        "property_name",
+        "value",
+        "scaling_stat",
+        "scaling_coefficient",
+        "modifier_bindings",
+    )
+    .collect()
+)
 ```
 
 The catalogs preserve the fields exported in the four source files. They do
@@ -357,7 +463,7 @@ The JSON-only manifest has `schema_version: 2`:
 | `snapshot.content_sha256` | Fingerprint of the four VData and five English localization input names, hashes, and sizes |
 | `snapshot.generator_sha256` | Fingerprint of the catalog/parser/packaging code, `pyproject.toml`, `uv.lock`, and installed Polars version |
 | `snapshot.dataset_sha256` | Fingerprint combining content, generator revision, and catalog schema version |
-| `catalogs.schema_version` | Catalog structure version; `5` adds misc definitions and qualified modifier identities; schema `4` releases remain readable |
+| `catalogs.schema_version` | Catalog structure version; `6` adds lookup indexes and declared stat changes; schemas `4` and `5` remain readable |
 | `catalogs.polars_version` | Polars version used by the catalog builder |
 | `catalogs.tables` | Empty in published manifests; row counts and column types when exporting local Parquet |
 | `catalogs.json_catalogs` | JSON envelope schema version and record count for each JSON catalog |
@@ -447,12 +553,36 @@ The equivalent GitHub CLI command is:
 gh workflow run build-assets.yml --repo pnxenopoulos/boon-data -f ref=master
 ```
 
-Both triggers use the same publisher and concurrency group, preventing scheduled
-and manual publication from running simultaneously. The built-in workflow token
-supplies repository write access; no additional release token is required.
+All publication workflows use the same publisher and concurrency group, preventing
+scheduled and manual publication from running simultaneously. The built-in workflow
+token supplies repository write access; no additional release token is required.
 
-Polling records the versions it observes; it does not yet scan all intermediate
-upstream commits. Use an explicit upstream `ref` to backfill missing versions.
+### Backfill historical data
+
+Open **Actions → Backfill boon-data → Run workflow**. Select the default branch
+for the boon-data workflow code and enter the full 40-character commit SHA from
+`SteamTracking/GameTracking-Deadlock` in `source_commit`. Choose the upstream
+commit whose file tree represents the point in time you want to capture; the
+input is not a boon-data commit, client version, or date.
+
+```bash
+gh workflow run backfill.yml --repo pnxenopoulos/boon-data \
+  -f source_commit="<full-upstream-commit-sha>"
+```
+
+The workflow reads `steam.inf`, all four VData files, and English localization
+from that exact commit. It publishes the same five JSON assets and records the
+source commit, client version, build date/time, and publication time in the index.
+New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
+Identical datasets reuse an existing snapshot; the historical client version is
+still added to `versions.json`. Neither the index's `latest` nor GitHub's latest
+release changes. Existing releases are never overwritten: rerunning the same
+snapshot verifies and reuses it, while different data for an already-published
+client-version tag fails. Missing historical inputs also fail instead of using
+current files.
+
+Polling records only the versions it observes. Backfill runs process one selected
+commit at a time; they do not scan all intermediate upstream commits.
 
 ## Version index
 
@@ -499,7 +629,9 @@ remain in the index's Git history.
 import json
 from urllib.request import urlopen
 
-url = "https://raw.githubusercontent.com/pnxenopoulos/boon-data/data-index/versions.json"
+url = (
+    "https://raw.githubusercontent.com/pnxenopoulos/boon-data/data-index/versions.json"
+)
 with urlopen(url) as response:
     index = json.load(response)
 
@@ -541,6 +673,9 @@ calculate resistance or lifesteal percentages for a live player.
 
 ```bash
 uv sync --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked ty check
 uv run --locked python -m unittest discover -s tests -v
 ```
 
@@ -548,7 +683,13 @@ uv run --locked python -m unittest discover -s tests -v
 `uv sync --locked` creates `.venv/` and checks the lockfile without changing it.
 The optional `.python-version` selects Python 3.13 for local runs and releases.
 CI uses the same Python 3.13 default on Ubuntu.
-Both workflows pin uv to 0.11.28 and use `uv run --locked`.
+All workflows pin uv to 0.11.28 and use `uv run --locked`.
+Ruff 0.16.9 and ty 0.0.84 are pinned as development dependencies, with the same
+lint, formatting, and type checks in CI and both publication workflows. Ruff also
+checks import ordering, modern syntax, common bug patterns, and simplifications.
+The checks include the tests; ty resolves the standalone modules in `scripts/`
+and treats warnings as failures. Ruff formatting also covers Python examples in
+this README. Run `uv run --locked ruff format .` to apply formatting locally.
 The scripts are a uv virtual project and are not installed as a Python package.
 
 The current catalog builder still uses Polars internally, including for JSON

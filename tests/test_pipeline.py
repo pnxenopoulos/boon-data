@@ -15,7 +15,7 @@ import pipeline
 FIXTURES = Path(__file__).parent / "fixtures"
 
 SHA = "a" * 40
-SOURCE = {
+SOURCE: dict = {
     "schema_version": 2,
     "source_key": "1234-" + SHA[:12],
     "client_version": "1234",

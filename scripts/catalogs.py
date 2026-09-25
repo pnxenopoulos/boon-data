@@ -11,7 +11,8 @@ from pathlib import Path
 import polars as pl
 from keyvalues import parse, to_json, unwrap
 
-CATALOG_SCHEMA_VERSION = 5
+CATALOG_SCHEMA_VERSION = 6
+JSON_SCHEMA_VERSION = 2
 VDATA_FILES = ("abilities.vdata", "heroes.vdata", "modifiers.vdata", "misc.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
@@ -259,6 +260,142 @@ def ability_property_table(
     )
 
 
+def pointer_segment(value: str) -> str:
+    """Escape one logical VData path segment (typed wrappers are transparent)."""
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def json_properties(record: dict) -> dict:
+    properties = record["definition"].get("m_mapAbilityProperties", {})
+    result = {}
+    for name, definition in sorted(properties.items()):
+        definition = unwrap(definition)
+        fields = definition if isinstance(definition, dict) else {}
+        result[name] = {
+            "value": number(fields.get("m_strValue")),
+            "raw_value": fields.get("m_strValue"),
+            "stat": fields.get("m_eProvidedPropertyType"),
+            "usage_flags": fields.get("m_eStatsUsageFlags"),
+            "display_units": fields.get("m_eDisplayUnits"),
+            "scaling": fields.get("m_subclassScaleFunction"),
+            "source_record_key": record["record_key"],
+            "definition_path": (
+                f"{record['definition_path']}/m_mapAbilityProperties/"
+                f"{pointer_segment(name)}"
+            ),
+            "modifier_keys": [],
+        }
+    return result
+
+
+def declared_values(record: dict) -> list[dict]:
+    """Expose only explicit stat/value pairs; retain ranges and unknown fields."""
+    changes = []
+    for field in ("m_vecScriptValues", "m_vecModifierValues"):
+        for index, definition in enumerate(record["definition"].get(field, [])):
+            fields = unwrap(definition)
+            changes.append(
+                {
+                    "kind": field,
+                    "stat": fields.get("m_eModifierValue"),
+                    "value": number(fields.get("m_value")),
+                    "raw_value": fields.get("m_value"),
+                    "value_min": number(fields.get("m_valueMin")),
+                    "value_max": number(fields.get("m_valueMax")),
+                    "source_record_key": record["record_key"],
+                    "definition_path": f"{record['definition_path']}/{field}/{index}",
+                    "definition": definition,
+                }
+            )
+    return changes
+
+
+def add_lookups(payloads: dict[str, dict]) -> None:
+    """Index every candidate and link explicit property bindings without applying effects."""
+    prefixes = {
+        "abilities": "ability",
+        "heroes": "hero",
+        "misc": "misc",
+        "modifiers": "modifier",
+    }
+    by_key = {}
+    properties = {}
+    for catalog, payload in payloads.items():
+        prefix = prefixes[catalog]
+        fields = {"by_id": f"{prefix}_id", "by_name": f"{prefix}_name"}
+        if catalog == "modifiers":
+            fields.update(
+                by_qualified_id="qualified_modifier_id",
+                by_qualified_name="qualified_modifier_name",
+            )
+        indexes = {name: {} for name in ("by_key", *fields)}
+        for index, record in enumerate(payload["records"]):
+            if catalog != "modifiers":
+                record["source_file"] = f"{catalog}.vdata"
+                record["definition_path"] = "/" + pointer_segment(
+                    record[f"{prefix}_name"]
+                )
+            key = f"{record['source_file']}#{record['definition_path']}"
+            if key in by_key:
+                raise ValueError(f"duplicate record key: {key}")
+            record["record_key"] = key
+            by_key[key] = record
+            indexes["by_key"][key] = index
+            for name, field in fields.items():
+                indexes[name].setdefault(str(record[field]), []).append(index)
+            record["modifier_keys"] = []
+            record["stat_changes"] = declared_values(record)
+            properties[key] = json_properties(record)
+            if catalog == "abilities" or properties[key]:
+                record["properties"] = properties[key]
+        payload["indexes"] = indexes
+
+    for modifier in payloads["modifiers"]["records"]:
+        root_path = "/" + modifier["definition_path"].split("/")[1]
+        owner_key = f"{modifier['source_file']}#{root_path}"
+        owner = by_key[owner_key]
+        if owner is not modifier:
+            owner["modifier_keys"].append(modifier["record_key"])
+        bindings = []
+        for name in modifier["definition"].get(
+            "m_vecAutoRegisterModifierValueFromAbilityPropertyName", []
+        ):
+            prop = properties[owner_key].get(name)
+            binding = {
+                "property_name": name,
+                "source_record_key": owner_key,
+                "status": "resolved" if prop is not None else "unresolved",
+                "property": None,
+            }
+            if prop is not None:
+                if modifier["record_key"] not in prop["modifier_keys"]:
+                    prop["modifier_keys"].append(modifier["record_key"])
+                binding["property"] = {
+                    k: v for k, v in prop.items() if k != "modifier_keys"
+                }
+                if prop["stat"]:
+                    modifier["stat_changes"].append(
+                        {
+                            "kind": "bound_property",
+                            "property_name": name,
+                            **binding["property"],
+                        }
+                    )
+            bindings.append(binding)
+        modifier["property_bindings"] = bindings
+
+    for record in payloads["abilities"]["records"]:
+        for name, prop in record["properties"].items():
+            if prop["stat"]:
+                record["stat_changes"].append(
+                    {
+                        "kind": "ability_property",
+                        "property_name": name,
+                        **prop,
+                    }
+                )
+
+
 def build_catalogs(
     vdata: dict[str, bytes],
     localization: dict[str, bytes],
@@ -378,7 +515,10 @@ def build_catalogs(
     def walk(value, path: str, source_file: str, owner: str, root: dict):
         value = unwrap(value)
         if isinstance(value, dict):
-            is_root = path == f"/{owner}" and source_file == "modifiers.vdata"
+            is_root = (
+                path == "/" + pointer_segment(owner)
+                and source_file == "modifiers.vdata"
+            )
             if is_root or str(value.get("_class", "")).startswith("modifier_"):
                 name = owner if is_root else value.get("_my_subclass_name")
                 if name:
@@ -420,7 +560,7 @@ def build_catalogs(
                     )
             for key, child in sorted(value.items()):
                 # JSON Pointer paths identify repeated subclasses without conflating them.
-                segment = key.replace("~", "~0").replace("/", "~1")
+                segment = pointer_segment(key)
                 walk(child, f"{path}/{segment}", source_file, owner, root)
         elif isinstance(value, list):
             for index, child in enumerate(value):
@@ -428,7 +568,7 @@ def build_catalogs(
 
     for source_file, entries in roots.items():
         for name, definition in entries.items():
-            walk(definition, f"/{name}", source_file, name, definition)
+            walk(definition, "/" + pointer_segment(name), source_file, name, definition)
     modifier_table = frame(
         modifiers,
         {
@@ -466,6 +606,7 @@ def build_catalogs(
         )
     metadata = {}
     json_metadata = {}
+    payloads = {}
     for name, table in tables.items():
         check_ids(
             table,
@@ -512,19 +653,19 @@ def build_catalogs(
                 }
                 for row in table.select(*identity, "definition_json").to_dicts()
             ]
-            payload = {
-                "schema_version": 1,
+            payloads[name] = {
+                "schema_version": JSON_SCHEMA_VERSION,
                 "catalog": name,
                 **provenance,
                 "records": records,
             }
-            (output / f"{name}.json").write_text(
-                to_json(payload) + "\n", encoding="utf-8"
-            )
             json_metadata[f"{name}.json"] = {
-                "schema_version": 1,
+                "schema_version": JSON_SCHEMA_VERSION,
                 "records": len(records),
             }
+    add_lookups(payloads)
+    for name, payload in payloads.items():
+        (output / f"{name}.json").write_text(to_json(payload) + "\n", encoding="utf-8")
     return {
         "schema_version": CATALOG_SCHEMA_VERSION,
         "generator": "boon-data",

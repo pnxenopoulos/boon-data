@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Never
 
 _TOKEN = re.compile(
     r"(?P<skip>\s+|//[^\n]*|/\*.*?\*/|<!--.*?-->)"
@@ -58,7 +58,7 @@ class _Reader:
         self.token = None
         self.advance()
 
-    def fail(self, message: str) -> None:
+    def fail(self, message: str) -> Never:
         line = self.text.count("\n", 0, self.position) + 1
         raise ValueError(f"{message} near line {line}")
 

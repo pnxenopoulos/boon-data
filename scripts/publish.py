@@ -51,7 +51,7 @@ def empty_index() -> dict:
     }
 
 
-def published_time(value: str) -> str:
+def published_time(value: object) -> str:
     """Normalize a GitHub release timestamp; previews never invent one."""
     if not isinstance(value, str):
         raise TypeError("release is missing its publication timestamp")
@@ -175,7 +175,7 @@ def observe(index: dict, source: dict, tag: str, *, latest: bool) -> None:
         and (previous is None or int(version) >= int(previous))
         and (
             previous_date is None
-            or datetime.fromisoformat(entry["source"]["committed_at"])
+            or datetime.fromisoformat(source["source"]["committed_at"])
             >= datetime.fromisoformat(previous_date)
         )
     ):
@@ -342,7 +342,7 @@ class GitHub:
 
 def verify_release(
     github: GitHub, release: dict | None, record: dict, *, published: bool
-) -> None:
+) -> dict:
     if release is None or (published and (release["draft"] or release["prerelease"])):
         raise ValueError("snapshot release is not published")
     assets = {asset["name"]: asset for asset in release["assets"]}
@@ -359,6 +359,7 @@ def verify_release(
             actual = digest.removeprefix("sha256:")
         if actual != expected["sha256"]:
             raise ValueError(f"release checksum mismatch: {name}")
+    return release
 
 
 def record_publication(index: dict, tag: str, release: dict) -> None:
@@ -411,8 +412,7 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
     record = plan["index"]["snapshots"][tag]
     release = github.release(tag)
     if plan["action"] == "reuse" or release is not None and not release["draft"]:
-        verify_release(github, release, record, published=True)
-        return release
+        return verify_release(github, release, record, published=True)
     directory = Path(plan["directory"])
     for name, checksum in record["artifacts"].items():
         if pipeline.fingerprint((directory / name).read_bytes()) != {
@@ -456,8 +456,7 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
     release = github.api(
         endpoint, method="PATCH", data={"draft": False, "make_latest": "false"}
     )
-    verify_release(github, release, record, published=True)
-    return release
+    return verify_release(github, release, record, published=True)
 
 
 def publish_plan(

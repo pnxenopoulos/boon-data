@@ -5,5 +5,20 @@ description = "Versioned Deadlock JSON stat catalogs"
 requires-python = ">=3.11"
 dependencies = ["polars==1.38.1"]
 
+[dependency-groups]
+dev = [
+    "ruff==0.16.9",
+    "ty==0.0.84",
+]
+
 [tool.uv]
 package = false
+
+[tool.ruff.lint]
+extend-select = ["B", "C4", "I", "SIM", "UP"]
+
+[tool.ty.environment]
+extra-paths = ["scripts"]
+
+[tool.ty.terminal]
+error-on-warning = true
