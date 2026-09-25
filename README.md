@@ -475,13 +475,15 @@ supports manual runs with an upstream `ref`. Both use
 `scripts/publish.py --vdata-only --publish` to gate new releases on changes to
 `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, or `misc.vdata`:
 
-1. Read the version index and recover any complete release published before an
-   interrupted index update.
+1. Read the version index and GitHub's release list. Recover any complete release
+   published before an interrupted index update. Only published releases can be
+   reused; stale index entries for missing releases do not count.
 2. Resolve and pin the requested upstream ref; download and verify its inputs.
 3. Compare the four VData file hashes and sizes with the latest indexed snapshot.
    If unchanged, reuse that snapshot even if localization, generator code,
    or dependencies changed. If there is no `latest` yet, compare with the most
-   recently observed backfilled version; an empty index builds its first release.
+   recently observed backfilled version. If that release is missing or the index
+   is empty, build the requested version.
 4. When VData changes, use the full dataset fingerprint to reuse an identical
    earlier snapshot or build **all five JSON assets**: `abilities.json`,
    `heroes.json`, `modifiers.json`, `misc.json`, and `manifest.json`.
@@ -583,7 +585,7 @@ Identical datasets reuse an existing snapshot; the historical client version is
 added to or replaced in `versions.json`. A backfill replaces that client version's
 entry with the selected commit, source revision, and build date/time, even when an
 existing entry points to a newer commit. The updated file is written to the
-`data-index` branch after release verification. Other versions, snapshot metadata,
+`data-index` branch after release verification. Unrelated versions and snapshots,
 and the `latest` pointer are preserved. An unchanged index needs no new commit.
 Existing releases are never overwritten: rerunning the same
 source content verifies and reuses the published files; it does not regenerate
@@ -591,8 +593,20 @@ them with newer code. Different source content for an already-published
 client-version tag fails. Missing historical inputs also fail instead of using
 current files.
 
+If the requested release and its Git tag were deleted, backfilling the same source
+content rebuilds it with the current generator and updates its index metadata after
+verification. Before creating the release, the publisher checks the Git tag
+separately. If a tag remains without a release, publication stops with an error;
+remove that leftover tag explicitly before recreating the release. The publisher
+never deletes or moves existing tags.
+Versions sharing that rebuilt release receive its new checksums and publication
+time while retaining their source observations. If the index write is interrupted,
+the next run recovers the recreated release from its verified manifest. A matching draft can resume;
+existing published assets are never overwritten. Local `--index` previews use only
+the supplied index and do not check GitHub release availability.
+
 A deleted latest release does not block publishing a different historical snapshot.
-Backfills preserve unrelated index entries. If a release was intentionally deleted,
+Backfills preserve unrelated index entries. To keep a release intentionally removed,
 remove its snapshot and referencing versions from `versions.json` on the
 `data-index` branch, and update `latest` to an available version or `null`.
 

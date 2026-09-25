@@ -34,6 +34,7 @@ class FakeGitHub(publish.GitHub):
         super().__init__(publish.DEFAULT_REPOSITORY)
         self.published_at: str | None = PUBLISHED_AT
         self.remote = {}
+        self.tags = set()
         self.blobs = {}
         self.index = publish.empty_index()
         self.commands = []
@@ -53,6 +54,9 @@ class FakeGitHub(publish.GitHub):
         return self.blobs[asset["id"]]
 
     def api(self, path, *, method="GET", data=None, missing_ok=False):
+        if path.startswith("git/ref/tags/") and method == "GET":
+            tag = path.removeprefix("git/ref/tags/")
+            return {"ref": f"refs/tags/{tag}"} if tag in self.tags else None
         if path == "releases" and method == "POST":
             assert data is not None
             tag = data["tag_name"]
@@ -75,6 +79,7 @@ class FakeGitHub(publish.GitHub):
             if data.get("draft") is False:
                 release["draft"] = False
                 release["published_at"] = self.published_at
+                self.tags.add(release["tag_name"])
             if data.get("make_latest") == "true":
                 self.latest = release["tag_name"]
         else:
@@ -497,6 +502,249 @@ class PublisherTests(unittest.TestCase):
                     self.assertEqual(self.github.commands, [])
         self.assertEqual(len(self.github.writes), 2)
 
+    def test_cli_backfill_rebuilds_a_deleted_release_and_preserves_other_versions(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        inputs = copy.deepcopy(self.inputs)
+        inputs[0]["abilities.vdata"] += b"\n// newer source"
+        newer = publish.make_plan(
+            source_at(), inputs, self.github.index, self.output, latest=True
+        )
+        publish.publish_plan(self.github, newer, self.github.index, "sha1", TARGET)
+        original = copy.deepcopy(self.github.index)
+        self.github.remote.clear()
+        self.github.tags.clear()
+        self.github.latest = None
+        self.github.commands.clear()
+        output = self.output / "backfill"
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "publish.py",
+                    "--ref",
+                    SOURCE["source"]["commit"],
+                    "--publish",
+                    "--target",
+                    TARGET,
+                    "--output",
+                    str(output),
+                ],
+            ),
+            patch.object(publish, "GitHub", return_value=self.github),
+            patch.object(self.github, "read_index", return_value=(original, "sha2")),
+            patch.object(pipeline, "resolve_source", return_value=SOURCE),
+            patch.object(pipeline, "download_inputs", return_value=self.inputs),
+            patch.object(pipeline, "generator_fingerprint", return_value="e" * 64),
+            patch("builtins.print"),
+        ):
+            publish.main()
+        self.assertEqual(
+            json.loads((output / "plan.json").read_text())["action"], "publish"
+        )
+        self.assertEqual(set(self.github.remote), {"1234"})
+        self.assertEqual(len(self.github.remote["1234"]["assets"]), 5)
+        self.assertFalse(self.github.remote["1234"]["draft"])
+        self.assertEqual(self.github.index["latest"], "1235")
+        self.assertEqual(
+            self.github.index["versions"]["1235"], original["versions"]["1235"]
+        )
+        self.assertEqual(
+            self.github.index["snapshots"]["1235"], original["snapshots"]["1235"]
+        )
+        self.assertNotEqual(
+            self.github.index["versions"]["1234"]["artifacts"],
+            original["versions"]["1234"]["artifacts"],
+        )
+        self.assertEqual(
+            self.github.index["versions"]["1234"]["source"], SOURCE["source"]
+        )
+        self.assertEqual(self.github.writes[-1][1], "sha2")
+        self.assertIsNone(self.github.latest)
+
+    def test_missing_release_with_existing_tag_is_not_recreated(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        del self.github.remote["1234"]
+        original = copy.deepcopy(self.github.index)
+        plan = publish.make_plan(
+            SOURCE,
+            self.inputs,
+            original,
+            self.output,
+            latest=False,
+            published_tags=set(),
+        )
+        self.github.commands.clear()
+        with self.assertRaisesRegex(
+            ValueError, "release 1234 is missing.*Git tag still exists"
+        ):
+            publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(self.github.tags, {"1234"})
+        self.assertEqual(self.github.remote, {})
+        self.assertEqual(self.github.index, original)
+        self.assertEqual(self.github.commands, [])
+        self.assertEqual(len(self.github.writes), 1)
+
+    def test_existing_tag_blocks_a_new_release_without_an_index_entry(self):
+        self.github.tags.add("1234")
+        with self.assertRaisesRegex(
+            ValueError, "release 1234 is missing.*Git tag still exists"
+        ):
+            publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        self.assertEqual(self.github.tags, {"1234"})
+        self.assertEqual(self.github.remote, {})
+        self.assertEqual(self.github.commands, [])
+        self.assertEqual(self.github.writes, [])
+
+    def test_missing_shared_snapshot_is_not_reused_by_a_new_version(self):
+        for vdata_only in (False, True):
+            with self.subTest(vdata_only=vdata_only):
+                plan = publish.make_plan(
+                    source_at(),
+                    self.inputs,
+                    self.plan["index"],
+                    self.output / str(vdata_only),
+                    latest=vdata_only,
+                    vdata_only=vdata_only,
+                    published_tags=set(),
+                )
+                self.assertEqual(plan["action"], "publish")
+                self.assertEqual(plan["snapshot"], "1235")
+                self.assertEqual(
+                    plan["index"]["versions"]["1234"],
+                    self.plan["index"]["versions"]["1234"],
+                )
+                self.assertEqual(
+                    plan["index"]["snapshots"]["1234"],
+                    self.plan["index"]["snapshots"]["1234"],
+                )
+
+    def test_rebuilt_release_refreshes_checksums_for_its_shared_versions(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        shared = publish.make_plan(
+            source_at(), self.inputs, self.github.index, self.output, latest=True
+        )
+        publish.publish_plan(self.github, shared, self.github.index, "sha1", TARGET)
+        original = copy.deepcopy(self.github.index)
+        self.github.remote.clear()
+        self.github.tags.clear()
+        self.github.published_at = "2026-09-25T19:00:00Z"
+        with patch.object(pipeline, "generator_fingerprint", return_value="e" * 64):
+            plan = publish.make_plan(
+                SOURCE,
+                self.inputs,
+                original,
+                self.output / "rebuilt",
+                latest=False,
+                published_tags=set(),
+            )
+        self.assertEqual(plan["action"], "publish")
+        publish.publish_plan(self.github, plan, original, "sha2", TARGET)
+        index = self.github.index
+        for version in ("1234", "1235"):
+            self.assertEqual(
+                index["versions"][version]["source"],
+                original["versions"][version]["source"],
+            )
+            self.assertEqual(
+                index["versions"][version]["artifacts"],
+                index["snapshots"]["1234"]["artifacts"],
+            )
+            self.assertEqual(
+                index["versions"][version]["released_at"], self.github.published_at
+            )
+        self.assertEqual(index["latest"], "1235")
+        self.assertNotEqual(
+            index["versions"]["1235"]["artifacts"],
+            original["versions"]["1235"]["artifacts"],
+        )
+        publish.validate_index(index, published=True)
+
+    def test_rebuilt_release_recovers_after_an_interrupted_index_update(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        shared = publish.make_plan(
+            source_at(), self.inputs, self.github.index, self.output, latest=True
+        )
+        publish.publish_plan(self.github, shared, self.github.index, "sha1", TARGET)
+        original = copy.deepcopy(self.github.index)
+        self.github.remote.clear()
+        self.github.tags.clear()
+        self.github.published_at = "2026-09-25T19:00:00Z"
+        with patch.object(pipeline, "generator_fingerprint", return_value="e" * 64):
+            plan = publish.make_plan(
+                SOURCE,
+                self.inputs,
+                original,
+                self.output / "rebuilt",
+                latest=False,
+                published_tags=set(),
+            )
+        self.github.fail_index = True
+        with self.assertRaisesRegex(OSError, "index update conflict"):
+            publish.publish_plan(self.github, plan, original, "sha2", TARGET)
+        self.assertEqual(self.github.index, original)
+        recovered = publish.recover_snapshots(self.github, original)
+        self.assertEqual(recovered, plan["index"])
+        self.github.fail_index = False
+        uploads = [c for c in self.github.commands if c[0] == "upload"]
+        plan = publish.make_plan(
+            SOURCE,
+            self.inputs,
+            recovered,
+            self.output,
+            latest=False,
+            published_tags={"1234"},
+        )
+        self.assertEqual(plan["action"], "reuse")
+        publish.publish_plan(self.github, plan, original, "sha2", TARGET)
+        self.assertEqual(self.github.index, recovered)
+        self.assertEqual([c for c in self.github.commands if c[0] == "upload"], uploads)
+
+    def test_indexed_draft_is_rebuilt_and_resumed_without_overwriting_assets(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        release = self.github.remote["1234"]
+        release["draft"] = True
+        removed = release["assets"].pop()
+        preserved = copy.deepcopy(release["assets"])
+        self.github.commands.clear()
+        plan = publish.make_plan(
+            SOURCE,
+            self.inputs,
+            self.github.index,
+            self.output,
+            latest=False,
+            published_tags=set(),
+        )
+        self.assertEqual(plan["action"], "publish")
+        publish.publish_plan(self.github, plan, self.github.index, "sha", TARGET)
+        self.assertFalse(release["draft"])
+        self.assertEqual(release["assets"][:-1], preserved)
+        self.assertEqual(release["assets"][-1]["name"], removed["name"])
+        self.assertEqual(len([c for c in self.github.commands if c[0] == "upload"]), 1)
+        self.assertFalse(any(c[0] == "create" for c in self.github.commands))
+
+    def test_prerelease_is_not_overwritten_or_indexed(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        self.github.remote["1234"]["prerelease"] = True
+        remote = copy.deepcopy(self.github.remote)
+        original = copy.deepcopy(self.github.index)
+        self.github.commands.clear()
+        plan = publish.make_plan(
+            SOURCE,
+            self.inputs,
+            original,
+            self.output,
+            latest=False,
+            published_tags=set(),
+        )
+        with self.assertRaisesRegex(
+            ValueError, "snapshot release is not published: 1234"
+        ):
+            publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(self.github.remote, remote)
+        self.assertEqual(self.github.index, original)
+        self.assertEqual(self.github.commands, [])
+
     def test_reuse_still_rejects_a_missing_selected_release(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
         del self.github.remote["1234"]
@@ -509,7 +757,7 @@ class PublisherTests(unittest.TestCase):
             latest=False,
         )
         self.assertEqual(plan["action"], "reuse")
-        with self.assertRaisesRegex(ValueError, "snapshot release is not published"):
+        with self.assertRaisesRegex(ValueError, "snapshot release is missing: 1234"):
             publish.publish_plan(self.github, plan, original, "sha", TARGET)
         self.assertEqual(self.github.index, original)
         self.assertEqual(len(self.github.writes), 1)

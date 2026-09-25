@@ -172,17 +172,23 @@ def make_plan(
     latest: bool,
     repository: str = DEFAULT_REPOSITORY,
     vdata_only: bool = False,
+    published_tags: set[str] | None = None,
 ) -> dict:
     metadata = pipeline.snapshot_metadata(source, *inputs)
     index = copy.deepcopy(index)
     dataset = metadata["snapshot"]["dataset_sha256"]
+    snapshots = {
+        tag: record
+        for tag, record in index["snapshots"].items()
+        if published_tags is None or tag in published_tags
+    }
     # Preserve an existing version's published files across generator changes.
     tag = (
         index["versions"]
         .get(source["client_version"], {})
         .get("snapshot", metadata["release_key"])
     )
-    record = index["snapshots"].get(tag)
+    record = snapshots.get(tag)
     if (
         record is None
         or record["identity"]["content_sha256"]
@@ -191,7 +197,7 @@ def make_plan(
         tag = next(
             (
                 tag
-                for tag, record in sorted(index["snapshots"].items())
+                for tag, record in sorted(snapshots.items())
                 if record["identity"]["dataset_sha256"] == dataset
             ),
             None,
@@ -202,12 +208,20 @@ def make_plan(
             key=lambda version: index["versions"][version]["source"]["committed_at"],
         )
         previous_tag = index["versions"][previous]["snapshot"]
-        previous_record = index["snapshots"][previous_tag]
-        if metadata["files"] == previous_record["files"]:
+        previous_record = snapshots.get(previous_tag)
+        if (
+            previous_record is not None
+            and metadata["files"] == previous_record["files"]
+        ):
             tag = previous_tag
     directory = None
     if tag is None:
-        if metadata["release_key"] in index["snapshots"]:
+        previous_record = index["snapshots"].get(metadata["release_key"])
+        if previous_record is not None and (
+            metadata["release_key"] in snapshots
+            or previous_record["identity"]["content_sha256"]
+            != metadata["snapshot"]["content_sha256"]
+        ):
             raise ValueError(
                 f"client version {source['client_version']} already has different "
                 "source content; refusing to overwrite its release"
@@ -217,6 +231,9 @@ def make_plan(
             (directory / "manifest.json").read_bytes(), repository
         )
         index["snapshots"][tag] = record
+        for entry in index["versions"].values():
+            if entry["snapshot"] == tag:
+                entry.update({key: record[key] for key in ("released_at", "artifacts")})
     observe(index, source, tag, latest=latest)
     return {
         "action": "publish" if directory else "reuse",
@@ -346,8 +363,10 @@ class GitHub:
 def verify_release(
     github: GitHub, release: dict | None, record: dict, *, published: bool
 ) -> dict:
-    if release is None or (published and (release["draft"] or release["prerelease"])):
-        raise ValueError("snapshot release is not published")
+    if release is None:
+        raise ValueError(f"snapshot release is missing: {record['client_version']}")
+    if published and (release["draft"] or release["prerelease"]):
+        raise ValueError(f"snapshot release is not published: {release['tag_name']}")
     assets = {asset["name"]: asset for asset in release["assets"]}
     if len(assets) != len(release["assets"]) or set(assets) != set(record["artifacts"]):
         raise ValueError("release does not contain the complete artifact set")
@@ -370,19 +389,25 @@ def record_publication(index: dict, tag: str, release: dict) -> None:
     record["released_at"] = published_time(release.get("published_at"))
     for entry in index["versions"].values():
         if entry["snapshot"] == tag:
-            entry["released_at"] = record["released_at"]
+            entry.update({key: record[key] for key in ("released_at", "artifacts")})
 
 
-def recover_snapshots(github: GitHub, index: dict) -> dict:
-    """Recover complete releases published before an interrupted index update."""
+def recover_snapshots(
+    github: GitHub, index: dict, *, releases: list[dict] | None = None
+) -> dict:
+    """Recover new or recreated releases after interrupted index updates."""
     index = copy.deepcopy(index)
-    for release in github.releases():
+    if releases is None:
+        releases = github.releases()
+    for release in releases:
         tag = release["tag_name"]
         if (
             release["draft"]
             or release["prerelease"]
             or not RELEASE_TAG.fullmatch(tag)
             or tag in index["snapshots"]
+            and published_time(release.get("published_at"))
+            == index["snapshots"][tag]["released_at"]
         ):
             continue
         asset = next(
@@ -423,6 +448,11 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
         }:
             raise ValueError(f"local release artifact changed: {name}")
     if release is None:
+        if github.api(f"git/ref/tags/{tag}", missing_ok=True) is not None:
+            raise ValueError(
+                f"release {tag} is missing but its Git tag still exists; "
+                "remove the leftover tag before recreating this release"
+            )
         release = github.api(
             "releases",
             method="POST",
@@ -516,6 +546,7 @@ def main() -> None:
         parser.error("--index is only available for local previews")
     try:
         github = GitHub(args.repository)
+        published_tags = None
         if args.index:
             original = (
                 validate_index(json.loads(args.index.read_text()))
@@ -526,7 +557,13 @@ def main() -> None:
             index = original
         else:
             original, previous_sha = github.read_index()
-            index = recover_snapshots(github, original)
+            releases = github.releases()
+            index = recover_snapshots(github, original, releases=releases)
+            published_tags = {
+                release["tag_name"]
+                for release in releases
+                if not release["draft"] and not release["prerelease"]
+            }
         source = pipeline.resolve_source(args.ref)
         plan = make_plan(
             source,
@@ -536,6 +573,7 @@ def main() -> None:
             latest=args.ref == "master",
             repository=github.repository,
             vdata_only=args.vdata_only,
+            published_tags=published_tags,
         )
         if args.publish:
             publish_plan(github, plan, original, previous_sha, args.target)
