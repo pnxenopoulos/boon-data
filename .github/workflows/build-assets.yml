@@ -36,8 +36,8 @@ jobs:
           uv run --locked ty check
       - name: Test the pipeline
         run: uv run --locked python -m unittest discover -s tests -v
-      - name: Publish changed snapshots and update the version index
+      - name: Publish VData changes and update the version index
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.ref || 'master' }}
-        run: uv run --locked python scripts/publish.py --ref "$SOURCE_REF" --publish
+        run: uv run --locked python scripts/publish.py --ref "$SOURCE_REF" --vdata-only --publish

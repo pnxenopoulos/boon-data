@@ -261,6 +261,177 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(plan["action"], "publish")
                 self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
 
+    def test_vdata_gate_ignores_localization_generator_and_schema_changes(self):
+        inputs = copy.deepcopy(self.inputs)
+        path = next(iter(inputs[1]))
+        inputs[1][path] += b"\n"
+        for source in (SOURCE, source_at()):
+            with (
+                self.subTest(version=source["client_version"]),
+                patch.object(pipeline, "generator_fingerprint", return_value="f" * 64),
+                patch.object(
+                    pipeline,
+                    "CATALOG_SCHEMA_VERSION",
+                    catalogs.CATALOG_SCHEMA_VERSION + 1,
+                ),
+                patch.object(
+                    pipeline, "build", side_effect=AssertionError("must not rebuild")
+                ),
+            ):
+                plan = publish.make_plan(
+                    source,
+                    inputs,
+                    self.plan["index"],
+                    self.output,
+                    latest=True,
+                    vdata_only=True,
+                )
+            self.assertEqual(plan["action"], "reuse")
+            self.assertEqual(plan["snapshot"], self.plan["snapshot"])
+            self.assertEqual(
+                plan["index"]["snapshots"], self.plan["index"]["snapshots"]
+            )
+            self.assertEqual(plan["index"]["latest"], source["client_version"])
+
+    def test_cli_vdata_gate_previews_reuse_after_a_generator_update(self):
+        index_path = self.output / "versions.json"
+        index_path.write_text(publish.to_json(self.plan["index"]))
+        output = self.output / "preview"
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "publish.py",
+                    "--vdata-only",
+                    "--index",
+                    str(index_path),
+                    "--output",
+                    str(output),
+                ],
+            ),
+            patch.object(pipeline, "resolve_source", return_value=source_at()),
+            patch.object(pipeline, "download_inputs", return_value=self.inputs),
+            patch.object(pipeline, "generator_fingerprint", return_value="f" * 64),
+            patch.object(
+                pipeline, "build", side_effect=AssertionError("must not rebuild")
+            ),
+            patch("builtins.print"),
+        ):
+            publish.main()
+        plan = json.loads((output / "plan.json").read_text())
+        index = json.loads((output / "versions.json").read_text())
+        self.assertEqual(plan["action"], "reuse")
+        self.assertEqual(index["versions"]["1235"]["snapshot"], "1234")
+        self.assertFalse((output / "1235").exists())
+
+    def test_vdata_gate_publishes_changes_to_each_required_file(self):
+        for name in sorted(pipeline.REQUIRED_FILES):
+            with self.subTest(file=name):
+                inputs = copy.deepcopy(self.inputs)
+                inputs[0][name] += b"\n"
+                plan = publish.make_plan(
+                    source_at(),
+                    inputs,
+                    self.plan["index"],
+                    self.output / name,
+                    latest=True,
+                    vdata_only=True,
+                )
+                self.assertEqual(plan["action"], "publish")
+                self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
+
+    def test_vdata_gate_bootstraps_an_empty_index(self):
+        plan = publish.make_plan(
+            SOURCE, self.inputs, self.initial, self.output, latest=True, vdata_only=True
+        )
+        self.assertEqual(plan["action"], "publish")
+
+    def test_vdata_gate_uses_a_backfill_when_no_latest_version_exists(self):
+        index = copy.deepcopy(self.plan["index"])
+        index["latest"] = None
+        with patch.object(pipeline, "generator_fingerprint", return_value="f" * 64):
+            plan = publish.make_plan(
+                source_at(),
+                self.inputs,
+                index,
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+        self.assertEqual(plan["action"], "reuse")
+        self.assertEqual(plan["index"]["latest"], "1235")
+
+    def test_vdata_gate_still_refuses_to_overwrite_a_changed_client_version(self):
+        inputs = copy.deepcopy(self.inputs)
+        inputs[0]["abilities.vdata"] += b"\n"
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            publish.make_plan(
+                SOURCE,
+                inputs,
+                self.plan["index"],
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+
+    def test_vdata_gate_records_new_versions_without_uploading_assets(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        uploads = [c for c in self.github.commands if c[0] == "upload"]
+        inputs = copy.deepcopy(self.inputs)
+        inputs[1].update({name: data + b"\n" for name, data in inputs[1].items()})
+        with patch.object(pipeline, "generator_fingerprint", return_value="f" * 64):
+            plan = publish.make_plan(
+                source_at(),
+                inputs,
+                self.github.index,
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+        publish.publish_plan(self.github, plan, self.github.index, "sha", TARGET)
+        self.assertEqual(self.github.index["latest"], "1235")
+        self.assertEqual(self.github.index["versions"]["1235"]["snapshot"], "1234")
+        self.assertEqual(self.github.latest, "1234")
+        self.assertEqual([c for c in self.github.commands if c[0] == "upload"], uploads)
+
+    def test_older_indexes_recover_vdata_hashes_from_verified_manifests(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        old_index = copy.deepcopy(self.github.index)
+        del old_index["snapshots"][self.plan["snapshot"]]["files"]
+        with self.assertRaisesRegex(ValueError, "refresh the index"):
+            publish.make_plan(
+                SOURCE,
+                self.inputs,
+                old_index,
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+        recovered = publish.recover_snapshots(self.github, old_index)
+        self.assertEqual(recovered, self.github.index)
+        self.assertNotIn("files", old_index["snapshots"][self.plan["snapshot"]])
+        with patch.object(pipeline, "generator_fingerprint", return_value="f" * 64):
+            plan = publish.make_plan(
+                source_at(),
+                self.inputs,
+                recovered,
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+        self.assertEqual(plan["action"], "reuse")
+
+    def test_older_index_source_hash_recovery_rejects_changed_manifest_bytes(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        old_index = copy.deepcopy(self.github.index)
+        del old_index["snapshots"][self.plan["snapshot"]]["files"]
+        release = self.github.release(self.plan["snapshot"])
+        asset = next(a for a in release["assets"] if a["name"] == "manifest.json")
+        self.github.blobs[asset["id"]] += b"\n"
+        with self.assertRaisesRegex(ValueError, "indexed manifest checksum mismatch"):
+            publish.recover_snapshots(self.github, old_index)
+
     def test_unrelated_vdata_does_not_trigger_release(self):
         inputs = copy.deepcopy(self.inputs)
         inputs[0]["extra.vdata"] = b"{extra={}}"

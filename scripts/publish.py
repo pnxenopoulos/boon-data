@@ -137,6 +137,7 @@ def snapshot_record(
     return tag, {
         "released_at": None,
         "identity": identity,
+        "files": manifest["files"],
         "client_version": manifest["client_version"],
         "source": manifest["source"],
         "artifacts": artifacts,
@@ -190,6 +191,7 @@ def make_plan(
     *,
     latest: bool,
     repository: str = DEFAULT_REPOSITORY,
+    vdata_only: bool = False,
 ) -> dict:
     metadata = pipeline.snapshot_metadata(source, *inputs)
     index = copy.deepcopy(index)
@@ -202,6 +204,19 @@ def make_plan(
         ),
         None,
     )
+    if vdata_only and index["versions"]:
+        previous = index["latest"] or max(
+            index["versions"],
+            key=lambda version: index["versions"][version]["source"]["committed_at"],
+        )
+        previous_tag = index["versions"][previous]["snapshot"]
+        previous_record = index["snapshots"][previous_tag]
+        if "files" not in previous_record:
+            raise ValueError(
+                "VData gate requires source hashes; refresh the index from GitHub"
+            )
+        if metadata["files"] == previous_record["files"]:
+            tag = previous_tag
     directory = None
     if tag is None:
         if metadata["release_key"] in index["snapshots"]:
@@ -371,15 +386,17 @@ def record_publication(index: dict, tag: str, release: dict) -> None:
 
 
 def recover_snapshots(github: GitHub, index: dict) -> dict:
-    """Recover a publication that succeeded before its index commit did."""
+    """Recover published snapshots and backfill source hashes in older indexes."""
     index = copy.deepcopy(index)
     for release in github.releases():
         tag = release["tag_name"]
+        existing_record = index["snapshots"].get(tag)
         if (
             release["draft"]
             or release["prerelease"]
             or not RELEASE_TAG.fullmatch(tag)
-            or tag in index["snapshots"]
+            or existing_record is not None
+            and "files" in existing_record
         ):
             continue
         asset = next(
@@ -388,6 +405,12 @@ def recover_snapshots(github: GitHub, index: dict) -> dict:
         if asset is None:
             raise ValueError(f"published snapshot has no manifest: {tag}")
         data = github.asset_bytes(asset)
+        if existing_record is not None:
+            expected = existing_record["artifacts"]["manifest.json"]
+            if pipeline.fingerprint(data) != {
+                key: expected[key] for key in ("sha256", "bytes")
+            }:
+                raise ValueError(f"indexed manifest checksum mismatch: {tag}")
         manifest_tag, record = snapshot_record(data, github.repository)
         if manifest_tag != tag:
             raise ValueError("published manifest does not match its release tag")
@@ -489,6 +512,11 @@ def publish_plan(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ref", default="master")
+    parser.add_argument(
+        "--vdata-only",
+        action="store_true",
+        help="Reuse the latest snapshot when the four VData files are unchanged.",
+    )
     parser.add_argument("--output", type=Path, default=Path(".work/dist"))
     parser.add_argument(
         "--repository",
@@ -527,6 +555,7 @@ def main() -> None:
             args.output,
             latest=args.ref == "master",
             repository=github.repository,
+            vdata_only=args.vdata_only,
         )
         if args.publish:
             publish_plan(github, plan, original, previous_sha, args.target)

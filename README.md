@@ -481,31 +481,44 @@ never replaced.
 ## Publishing and change detection
 
 `.github/workflows/build-assets.yml` checks hourly, at minute 0 (UTC), and
-supports manual runs with an upstream `ref`. A check publishes a new
-release only when the dataset changes. It invokes `scripts/publish.py --publish`:
+supports manual runs with an upstream `ref`. Both use
+`scripts/publish.py --vdata-only --publish` to gate new releases on changes to
+`abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, or `misc.vdata`:
 
 1. Read the version index and recover any complete release published before an
    interrupted index update.
 2. Resolve and pin the requested upstream ref; download and verify its inputs.
-3. Compare the content, generator, and schema fingerprint against indexed
-   snapshots. Version numbers and commit timestamps do not create new content.
-4. If the dataset is new, build **all five JSON assets**: `abilities.json`,
+3. Compare the four VData file hashes and sizes with the latest indexed snapshot.
+   If unchanged, reuse that snapshot even if localization, generator code, schema,
+   or dependencies changed. If there is no `latest` yet, compare with the most
+   recently observed backfilled version; an empty index builds its first release.
+4. When VData changes, use the full dataset fingerprint to reuse an identical
+   earlier snapshot or build **all five JSON assets**: `abilities.json`,
    `heroes.json`, `modifiers.json`, `misc.json`, and `manifest.json`.
 5. Upload to a draft, verify the complete asset list, sizes, and SHA-256 hashes,
    and only then publish the release. Interrupted draft uploads can resume.
 6. Record the client version, asset URLs/checksums, and the release's actual
    GitHub `published_at` timestamp (normalized to UTC as `released_at`). Reuse an
-   existing snapshot when inputs and generator revision are identical.
+   existing snapshot when the VData gate or full dataset comparison matches.
+   A new client version with unchanged VData is still recorded against the reused
+   snapshot, without creating a release or re-uploading assets.
 7. Commit the index atomically to `data-index/versions.json`, using the previous
    file SHA to reject conflicting updates. Runs against `master` update `latest`
    to the client version; explicit historical refs do not advance it. Older
    observations cannot replace a newer commit for the same client version.
 
-The fingerprint includes the **four catalog VData files and five English
-localization files**, including property additions and removals. Changes to
-other upstream VData files do not trigger releases. A reversion to earlier content can
-reuse that earlier snapshot. GitHub's latest release follows the snapshot used
-by the latest indexed observation, even when that snapshot is reused.
+The gate compares file contents, not upstream commit IDs. Localization-only,
+metadata-only, generator/schema, lockfile, and lint-tool updates do not trigger
+new releases in **Build boon-data**. Their changes are incorporated when the next
+VData change requires a build. Other upstream VData files do not trigger releases.
+The full content, generator, and schema fingerprints remain in the manifest for
+provenance and exact snapshot reuse. GitHub's latest release follows the snapshot
+used by the latest indexed observation, even when that snapshot is reused.
+
+Snapshot entries in the index now retain the manifest's `files` hashes. Older
+published entries are upgraded automatically from their checksum-verified release
+manifests; no releases are replaced. A local preview index without these hashes
+must be refreshed from GitHub before using `--vdata-only`.
 
 The default workflow needs only its built-in `GITHUB_TOKEN` with contents-write
 permission. The `data-index` branch is created on first publication. The index
@@ -516,8 +529,8 @@ missing/corrupt published asset fails verification rather than being replaced.
 Preview without changing GitHub:
 
 ```bash
-# Read the public index, prepare artifacts, and write a candidate plan/index locally.
-uv run --locked python scripts/publish.py
+# Preview the hourly workflow's VData gate against the public index.
+uv run --locked python scripts/publish.py --vdata-only
 
 # Use a local index (a missing file starts an empty preview index).
 uv run --locked python scripts/publish.py --index .work/seed-versions.json --output .work/preview
@@ -541,10 +554,10 @@ schedule is a polling interval rather than an exact publication deadline.
 For the first release or any manual check, open **Actions → Build boon-data →
 Run workflow**. Select the default branch for the workflow code and leave the
 upstream `ref` input as `master`, or enter an upstream branch, tag, or commit to
-build a specific snapshot. The same content checks apply to manual runs, so an
-unchanged dataset reuses the existing release. Manual runs never overwrite
-published assets. Changed inputs or generator revisions require an unused
-client-version tag. Interrupted drafts resume by verifying existing assets
+check a specific snapshot. The same VData gate applies to manual runs of
+**Build boon-data**. Use **Backfill boon-data** for an explicit historical build
+with full dataset matching instead of the VData gate. Manual runs never overwrite
+published assets. Any new snapshot requires an unused client-version tag. Interrupted drafts resume by verifying existing assets
 and uploading only missing files; mismatched assets fail instead of being replaced.
 
 The equivalent GitHub CLI command is:
@@ -570,8 +583,9 @@ gh workflow run backfill.yml --repo pnxenopoulos/boon-data \
   -f source_commit="<full-upstream-commit-sha>"
 ```
 
-The workflow reads `steam.inf`, all four VData files, and English localization
-from that exact commit. It publishes the same five JSON assets and records the
+The backfill workflow deliberately omits `--vdata-only`: it uses full content,
+generator, and schema matching for the requested historical snapshot. It reads
+`steam.inf`, all four VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
 source commit, client version, build date/time, and publication time in the index.
 New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
 Identical datasets reuse an existing snapshot; the historical client version is
