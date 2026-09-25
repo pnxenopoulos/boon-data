@@ -595,6 +595,11 @@ snapshot verifies and reuses it, while different data for an already-published
 client-version tag fails. Missing historical inputs also fail instead of using
 current files.
 
+A deleted latest release does not block publishing a different historical snapshot.
+Backfills preserve unrelated index entries. If a release was intentionally deleted,
+remove its snapshot and referencing versions from `versions.json` on the
+`data-index` branch, and update `latest` to an available version or `null`.
+
 Polling records only the versions it observes. Backfill runs process one selected
 commit at a time; they do not scan all intermediate upstream commits.
 

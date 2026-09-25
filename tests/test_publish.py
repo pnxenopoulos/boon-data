@@ -108,8 +108,6 @@ class FakeGitHub(publish.GitHub):
 
     def write_index(self, index, previous_sha, target):
         publish.validate_index(index, published=True)
-        for tag, record in index["snapshots"].items():
-            publish.verify_release(self, self.remote[tag], record, published=True)
         if self.fail_index:
             raise OSError("index update conflict")
         self.writes.append((copy.deepcopy(index), previous_sha, target))
@@ -518,6 +516,59 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.github.index, index)
         self.assertEqual(self.github.latest, "1234")
         self.assertEqual([c for c in self.github.commands if c[0] == "upload"], uploads)
+
+    def test_backfill_succeeds_when_the_indexed_latest_release_was_deleted(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        del self.github.remote["1234"]
+        self.github.latest = None
+        source = source_at(version="1233", date="2026-09-17T12:00:00Z")
+        inputs = copy.deepcopy(self.inputs)
+        inputs[0]["abilities.vdata"] += b"\n// historical input"
+
+        for action in ("publish", "reuse"):
+            with self.subTest(action=action):
+                original = copy.deepcopy(self.github.index)
+                index = publish.recover_snapshots(self.github, original)
+                plan = publish.make_plan(
+                    source, inputs, index, self.output, latest=False
+                )
+                self.assertEqual(plan["action"], action)
+                self.github.commands.clear()
+                with patch.object(
+                    self.github, "release", wraps=self.github.release
+                ) as lookup:
+                    publish.publish_plan(self.github, plan, original, "sha", TARGET)
+                lookup.assert_called_once_with("1233")
+                self.assertEqual(self.github.index["latest"], "1234")
+                self.assertEqual(
+                    self.github.index["versions"]["1234"], original["versions"]["1234"]
+                )
+                self.assertEqual(
+                    self.github.index["versions"]["1233"]["source"], source["source"]
+                )
+                self.assertIsNone(self.github.latest)
+                self.assertFalse(self.github.remote["1233"]["draft"])
+                self.assertEqual(len(self.github.remote["1233"]["assets"]), 5)
+                if action == "reuse":
+                    self.assertEqual(self.github.commands, [])
+        self.assertEqual(len(self.github.writes), 2)
+
+    def test_reuse_still_rejects_a_missing_selected_release(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        del self.github.remote["1234"]
+        original = copy.deepcopy(self.github.index)
+        plan = publish.make_plan(
+            source_at(version="1233", date="2026-09-17T12:00:00Z"),
+            self.inputs,
+            original,
+            self.output,
+            latest=False,
+        )
+        self.assertEqual(plan["action"], "reuse")
+        with self.assertRaisesRegex(ValueError, "snapshot release is not published"):
+            publish.publish_plan(self.github, plan, original, "sha", TARGET)
+        self.assertEqual(self.github.index, original)
+        self.assertEqual(len(self.github.writes), 1)
 
     def test_complete_release_is_verified_before_index_commit(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)

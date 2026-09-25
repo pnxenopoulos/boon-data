@@ -497,13 +497,13 @@ def publish_plan(
     if plan["index"] != original_index:
         github.write_index(plan["index"], previous_sha, target)
     latest = plan["index"]["latest"]
-    if latest is not None:
-        tag = plan["index"]["versions"][latest]["snapshot"]
-        latest_release = release if release["tag_name"] == tag else github.release(tag)
-        if latest_release is None:
-            raise ValueError(f"latest snapshot release is missing: {tag}")
+    # Historical publishes must not depend on an unrelated latest release.
+    if (
+        latest is not None
+        and plan["index"]["versions"][latest]["snapshot"] == plan["snapshot"]
+    ):
         github.api(
-            f"releases/{latest_release['id']}",
+            f"releases/{release['id']}",
             method="PATCH",
             data={"make_latest": "true"},
         )
