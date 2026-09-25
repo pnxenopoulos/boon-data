@@ -15,12 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
-from catalogs import (
-    CATALOG_SCHEMA_VERSION,
-    LOCALIZATION_FILES,
-    VDATA_FILES,
-    build_catalogs,
-)
+from catalogs import LOCALIZATION_FILES, VDATA_FILES, build_catalogs
 from keyvalues import to_json
 
 SOURCE_REPO = "SteamTracking/GameTracking-Deadlock"
@@ -59,7 +54,6 @@ def resolve_source(ref: str) -> dict:
     if not re.fullmatch(r"[0-9]+", client_version):
         raise ValueError("steam.inf is missing a numeric ClientVersion")
     return {
-        "schema_version": 2,
         "source_key": f"{client_version}-{sha[:12]}",
         "source": {
             "repository": SOURCE_REPO,
@@ -110,12 +104,10 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
     identity = {
         "content_sha256": content_hash,
         "generator_sha256": generator_fingerprint(),
-        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
     }
     dataset_hash = fingerprint(to_json(identity).encode())["sha256"]
     return {
         **source,
-        "schema_version": 2,
         "release_key": source["client_version"],
         "files": files,
         "localization_files": localization_files,

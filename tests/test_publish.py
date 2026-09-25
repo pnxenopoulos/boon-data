@@ -132,59 +132,7 @@ class PublisherTests(unittest.TestCase):
         )
         self.github = FakeGitHub()
 
-    def legacy_snapshot(self):
-        manifest = json.loads(
-            (Path(self.plan["directory"]) / "manifest.json").read_bytes()
-        )
-        del manifest["artifacts"]["misc.json"]
-        del manifest["files"]["misc.vdata"]
-        del manifest["catalogs"]["json_catalogs"]["misc.json"]
-        del manifest["catalogs"]["vdata_metadata"]["misc.vdata"]
-        manifest["catalogs"]["schema_version"] = 4
-        identity = manifest["snapshot"]
-        identity["catalog_schema_version"] = 4
-        identity["content_sha256"] = pipeline.fingerprint(
-            publish.to_json(
-                {key: manifest[key] for key in ("files", "localization_files")}
-            ).encode()
-        )["sha256"]
-        identity["dataset_sha256"] = pipeline.fingerprint(
-            publish.to_json(
-                {
-                    key: identity[key]
-                    for key in (
-                        "content_sha256",
-                        "generator_sha256",
-                        "catalog_schema_version",
-                    )
-                }
-            ).encode()
-        )["sha256"]
-        return manifest
-
-    def test_legacy_release_remains_readable_in_a_mixed_schema_index(self):
-        manifest = self.legacy_snapshot()
-        tag, record = publish.snapshot_record(publish.to_json(manifest).encode())
-        self.assertEqual(
-            set(record["artifacts"]),
-            {"abilities.json", "heroes.json", "modifiers.json", "manifest.json"},
-        )
-        index = publish.empty_index()
-        index["snapshots"][tag] = record
-        publish.observe(index, SOURCE, tag, latest=True)
-        publish.validate_index(index)
-        mixed = publish.make_plan(
-            source_at(), self.inputs, index, self.output / "mixed", latest=True
-        )
-        self.assertEqual(set(mixed["index"]["snapshots"]), {"1234", "1235"})
-        self.assertIn("misc.json", mixed["index"]["versions"]["1235"]["artifacts"])
-        self.assertNotIn("misc.json", mixed["index"]["versions"]["1234"]["artifacts"])
-        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
-            publish.make_plan(
-                SOURCE, self.inputs, index, self.output / "replacement", latest=True
-            )
-
-    def test_misc_is_required_by_new_manifests_and_index_records(self):
+    def test_misc_is_required_by_manifests_and_index_records(self):
         manifest = json.loads(
             (Path(self.plan["directory"]) / "manifest.json").read_bytes()
         )
@@ -259,7 +207,7 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(plan["action"], "publish")
                 self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
 
-    def test_vdata_gate_ignores_localization_generator_and_schema_changes(self):
+    def test_vdata_gate_ignores_localization_and_generator_changes(self):
         inputs = copy.deepcopy(self.inputs)
         path = next(iter(inputs[1]))
         inputs[1][path] += b"\n"
@@ -267,11 +215,6 @@ class PublisherTests(unittest.TestCase):
             with (
                 self.subTest(version=source["client_version"]),
                 patch.object(pipeline, "generator_fingerprint", return_value="f" * 64),
-                patch.object(
-                    pipeline,
-                    "CATALOG_SCHEMA_VERSION",
-                    catalogs.CATALOG_SCHEMA_VERSION + 1,
-                ),
                 patch.object(
                     pipeline, "build", side_effect=AssertionError("must not rebuild")
                 ),
@@ -393,43 +336,6 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.github.latest, "1234")
         self.assertEqual([c for c in self.github.commands if c[0] == "upload"], uploads)
 
-    def test_older_indexes_recover_vdata_hashes_from_verified_manifests(self):
-        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
-        old_index = copy.deepcopy(self.github.index)
-        del old_index["snapshots"][self.plan["snapshot"]]["files"]
-        with self.assertRaisesRegex(ValueError, "refresh the index"):
-            publish.make_plan(
-                SOURCE,
-                self.inputs,
-                old_index,
-                self.output,
-                latest=True,
-                vdata_only=True,
-            )
-        recovered = publish.recover_snapshots(self.github, old_index)
-        self.assertEqual(recovered, self.github.index)
-        self.assertNotIn("files", old_index["snapshots"][self.plan["snapshot"]])
-        with patch.object(pipeline, "generator_fingerprint", return_value="f" * 64):
-            plan = publish.make_plan(
-                source_at(),
-                self.inputs,
-                recovered,
-                self.output,
-                latest=True,
-                vdata_only=True,
-            )
-        self.assertEqual(plan["action"], "reuse")
-
-    def test_older_index_source_hash_recovery_rejects_changed_manifest_bytes(self):
-        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
-        old_index = copy.deepcopy(self.github.index)
-        del old_index["snapshots"][self.plan["snapshot"]]["files"]
-        release = self.github.release(self.plan["snapshot"])
-        asset = next(a for a in release["assets"] if a["name"] == "manifest.json")
-        self.github.blobs[asset["id"]] += b"\n"
-        with self.assertRaisesRegex(ValueError, "indexed manifest checksum mismatch"):
-            publish.recover_snapshots(self.github, old_index)
-
     def test_unrelated_vdata_does_not_trigger_release(self):
         inputs = copy.deepcopy(self.inputs)
         inputs[0]["extra.vdata"] = b"{extra={}}"
@@ -460,17 +366,6 @@ class PublisherTests(unittest.TestCase):
         ):
             publish.make_plan(SOURCE, self.inputs, original, self.output, latest=True)
         self.assertEqual(original, self.plan["index"])
-
-    def test_schema_revision_produces_new_dataset(self):
-        revision = catalogs.CATALOG_SCHEMA_VERSION + 1
-        with (
-            patch.object(pipeline, "CATALOG_SCHEMA_VERSION", revision),
-            patch.object(catalogs, "CATALOG_SCHEMA_VERSION", revision),
-        ):
-            plan = publish.make_plan(
-                source_at(), self.inputs, self.plan["index"], self.output, latest=True
-            )
-        self.assertEqual(plan["snapshot"], "1235")
 
     def test_manual_backfill_does_not_advance_latest(self):
         plan = publish.make_plan(
@@ -620,7 +515,6 @@ class PublisherTests(unittest.TestCase):
 
     def test_versions_include_publication_time_and_download_metadata(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
-        self.assertEqual(self.github.index["schema_version"], 2)
         self.assertEqual(self.github.index["latest"], "1234")
         self.assertEqual(set(self.github.index["versions"]), {"1234"})
         entry = self.github.index["versions"]["1234"]
@@ -703,16 +597,10 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.github.index, original)
         self.assertEqual(self.github.remote, remote)
 
-    def test_historical_hash_manifest_keeps_its_original_download_urls(self):
+    def test_manifest_tag_must_equal_the_client_version(self):
         manifest = json.loads(
             (Path(self.plan["directory"]) / "manifest.json").read_bytes()
         )
-        legacy = f"1234-{SOURCE['source']['commit'][:12]}-r{manifest['snapshot']['dataset_sha256'][:12]}"
-        manifest["release_key"] = legacy
-        tag, record = publish.snapshot_record(json.dumps(manifest).encode())
-        self.assertEqual(tag, legacy)
-        for asset in record["artifacts"].values():
-            self.assertIn(f"/releases/download/{legacy}/", asset["url"])
         manifest["release_key"] = "5678"
         with self.assertRaisesRegex(ValueError, "release tag does not match"):
             publish.snapshot_record(json.dumps(manifest).encode())

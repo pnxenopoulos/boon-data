@@ -261,7 +261,6 @@ class CatalogTests(unittest.TestCase):
         )
 
     def test_manifest_describes_the_written_schema_and_retains_root_metadata(self):
-        self.assertEqual(self.metadata["schema_version"], 6)
         for name, metadata in self.metadata["tables"].items():
             table = pl.read_parquet(self.output / name)
             self.assertEqual(metadata["rows"], table.height)
@@ -322,7 +321,6 @@ class CatalogTests(unittest.TestCase):
                     by_qualified_id="qualified_modifier_id",
                     by_qualified_name="qualified_modifier_name",
                 )
-            self.assertEqual(payload["schema_version"], 2)
             self.assertEqual(len(payload["indexes"]["by_key"]), len(payload["records"]))
             for index, record in enumerate(payload["records"]):
                 self.assertEqual(
@@ -524,7 +522,6 @@ class CatalogTests(unittest.TestCase):
     def test_misc_preserves_temporary_and_permanent_pickup_definitions(self):
         payload = json.loads((self.output / "misc.json").read_text())
         self.assertEqual(payload["catalog"], "misc")
-        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["client_version"], "1234")
         records = {r["misc_name"]: r for r in payload["records"]}
         gun = records["gun_powerup_pickup"]

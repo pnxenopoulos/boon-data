@@ -22,8 +22,7 @@ from keyvalues import to_json
 DEFAULT_REPOSITORY = "pnxenopoulos/boon-data"
 INDEX_BRANCH = "data-index"
 INDEX_FILE = "versions.json"
-# Accept historical tags when recovering previously published releases.
-RELEASE_TAG = re.compile(r"[0-9]+(?:-[0-9a-f]{12}-r[0-9a-f]{12})?")
+RELEASE_TAG = re.compile(r"[0-9]+")
 ARTIFACTS = {
     "abilities.json",
     "heroes.json",
@@ -32,18 +31,8 @@ ARTIFACTS = {
 }
 
 
-def artifact_names(schema_version: int) -> set[str]:
-    """Keep pre-misc releases readable while requiring complete new bundles."""
-    if schema_version == 4:
-        return ARTIFACTS - {"misc.json"}
-    if 5 <= schema_version <= pipeline.CATALOG_SCHEMA_VERSION:
-        return ARTIFACTS
-    raise ValueError(f"unsupported catalog schema: {schema_version}")
-
-
 def empty_index() -> dict:
     return {
-        "schema_version": 2,
         "source_repository": pipeline.SOURCE_REPO,
         "latest": None,
         "versions": {},
@@ -62,11 +51,8 @@ def published_time(value: object) -> str:
 
 
 def validate_index(index: dict, *, published: bool = False) -> dict:
-    if (
-        index["schema_version"] != 2
-        or index["source_repository"] != pipeline.SOURCE_REPO
-    ):
-        raise ValueError("unsupported version index")
+    if index["source_repository"] != pipeline.SOURCE_REPO:
+        raise ValueError("unexpected source repository in version index")
     if not isinstance(index["versions"], dict) or not isinstance(
         index["snapshots"], dict
     ):
@@ -74,9 +60,7 @@ def validate_index(index: dict, *, published: bool = False) -> dict:
     for record in index["snapshots"].values():
         if published or record["released_at"] is not None:
             published_time(record["released_at"])
-        if set(record["artifacts"]) != artifact_names(
-            record["identity"]["catalog_schema_version"]
-        ) | {"manifest.json"}:
+        if set(record["artifacts"]) != ARTIFACTS | {"manifest.json"}:
             raise ValueError("snapshot index has an invalid artifact set")
     for version, entry in index["versions"].items():
         if (
@@ -99,11 +83,11 @@ def snapshot_record(
     """Validate a manifest before registering its complete asset set in the index."""
     manifest = json.loads(data)
     tag, identity = manifest["release_key"], manifest["snapshot"]
-    if not RELEASE_TAG.fullmatch(tag) or manifest["schema_version"] != 2:
-        raise ValueError("unsupported snapshot manifest")
+    if not RELEASE_TAG.fullmatch(tag) or tag != manifest["client_version"]:
+        raise ValueError("release tag does not match the client version")
     if manifest["source"]["repository"] != pipeline.SOURCE_REPO:
         raise ValueError("unexpected snapshot source repository")
-    if set(manifest["artifacts"]) != artifact_names(identity["catalog_schema_version"]):
+    if set(manifest["artifacts"]) != ARTIFACTS:
         raise ValueError("snapshot manifest does not describe a complete release")
     inputs = {key: manifest[key] for key in ("files", "localization_files")}
     if (
@@ -112,18 +96,11 @@ def snapshot_record(
     ):
         raise ValueError("invalid source content fingerprint")
     revision = {
-        key: identity[key]
-        for key in ("content_sha256", "generator_sha256", "catalog_schema_version")
+        key: value for key, value in identity.items() if key != "dataset_sha256"
     }
     dataset = pipeline.fingerprint(to_json(revision).encode())["sha256"]
-    if (
-        dataset != identity["dataset_sha256"]
-        or manifest["catalogs"]["schema_version"] != identity["catalog_schema_version"]
-    ):
+    if dataset != identity["dataset_sha256"]:
         raise ValueError("invalid dataset fingerprint")
-    expected_tag = f"{manifest['client_version']}-{manifest['source']['commit'][:12]}-r{dataset[:12]}"
-    if tag not in (manifest["client_version"], expected_tag):
-        raise ValueError("release tag does not match the snapshot identity")
     artifacts = {**manifest["artifacts"], "manifest.json": pipeline.fingerprint(data)}
     for item in artifacts.values():
         if (
@@ -211,10 +188,6 @@ def make_plan(
         )
         previous_tag = index["versions"][previous]["snapshot"]
         previous_record = index["snapshots"][previous_tag]
-        if "files" not in previous_record:
-            raise ValueError(
-                "VData gate requires source hashes; refresh the index from GitHub"
-            )
         if metadata["files"] == previous_record["files"]:
             tag = previous_tag
     directory = None
@@ -386,17 +359,15 @@ def record_publication(index: dict, tag: str, release: dict) -> None:
 
 
 def recover_snapshots(github: GitHub, index: dict) -> dict:
-    """Recover published snapshots and backfill source hashes in older indexes."""
+    """Recover complete releases published before an interrupted index update."""
     index = copy.deepcopy(index)
     for release in github.releases():
         tag = release["tag_name"]
-        existing_record = index["snapshots"].get(tag)
         if (
             release["draft"]
             or release["prerelease"]
             or not RELEASE_TAG.fullmatch(tag)
-            or existing_record is not None
-            and "files" in existing_record
+            or tag in index["snapshots"]
         ):
             continue
         asset = next(
@@ -405,12 +376,6 @@ def recover_snapshots(github: GitHub, index: dict) -> dict:
         if asset is None:
             raise ValueError(f"published snapshot has no manifest: {tag}")
         data = github.asset_bytes(asset)
-        if existing_record is not None:
-            expected = existing_record["artifacts"]["manifest.json"]
-            if pipeline.fingerprint(data) != {
-                key: expected[key] for key in ("sha256", "bytes")
-            }:
-                raise ValueError(f"indexed manifest checksum mismatch: {tag}")
         manifest_tag, record = snapshot_record(data, github.repository)
         if manifest_tag != tag:
             raise ValueError("published manifest does not match its release tag")

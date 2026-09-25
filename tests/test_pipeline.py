@@ -16,7 +16,6 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 SHA = "a" * 40
 SOURCE: dict = {
-    "schema_version": 2,
     "source_key": "1234-" + SHA[:12],
     "client_version": "1234",
     "server_version": "1234",
@@ -99,7 +98,6 @@ class PipelineTests(unittest.TestCase):
     def test_packages_only_json_and_records_input_hashes(self):
         directory = pipeline.build(SOURCE, self.output)
         manifest = json.loads((directory / "manifest.json").read_text())
-        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(directory.name, "1234")
         self.assertEqual(manifest["release_key"], "1234")
         self.assertEqual(set(manifest["files"]), pipeline.REQUIRED_FILES)

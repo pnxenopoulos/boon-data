@@ -11,8 +11,6 @@ from pathlib import Path
 import polars as pl
 from keyvalues import parse, to_json, unwrap
 
-CATALOG_SCHEMA_VERSION = 6
-JSON_SCHEMA_VERSION = 2
 VDATA_FILES = ("abilities.vdata", "heroes.vdata", "modifiers.vdata", "misc.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
@@ -654,20 +652,15 @@ def build_catalogs(
                 for row in table.select(*identity, "definition_json").to_dicts()
             ]
             payloads[name] = {
-                "schema_version": JSON_SCHEMA_VERSION,
                 "catalog": name,
                 **provenance,
                 "records": records,
             }
-            json_metadata[f"{name}.json"] = {
-                "schema_version": JSON_SCHEMA_VERSION,
-                "records": len(records),
-            }
+            json_metadata[f"{name}.json"] = {"records": len(records)}
     add_lookups(payloads)
     for name, payload in payloads.items():
         (output / f"{name}.json").write_text(to_json(payload) + "\n", encoding="utf-8")
     return {
-        "schema_version": CATALOG_SCHEMA_VERSION,
         "generator": "boon-data",
         "polars_version": pl.__version__,
         "tables": metadata,

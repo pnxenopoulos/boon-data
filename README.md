@@ -42,8 +42,8 @@ The pipeline:
 5. Downloads and verifies the English hero, ability, item, modifier, and general UI
    localization files at the same commit.
 6. Parses the four catalog VData files, joins names, and writes JSON catalogs.
-7. Writes `manifest.json` with provenance, game identifiers, catalog schemas
-   and record counts, and SHA-256 hashes for every input and output file.
+7. Writes `manifest.json` with provenance, game identifiers, catalog record counts,
+   and SHA-256 hashes for every input and output file.
 
 Release tags are the Deadlock **ClientVersion**, for example `6698`, with the
 GitHub release title **boon-data-6698**. The release URL is
@@ -51,10 +51,9 @@ GitHub release title **boon-data-6698**. The release URL is
 Full SHA-256 fingerprints and the full upstream commit SHA remain in the
 manifest for provenance and verification; they are not part of the tag.
 
-A client-version tag cannot hold two different snapshots. If catalog inputs,
-generator code, or schema change for an already released version, publication
-fails without replacing its assets. Historical hash-tagged releases and their
-index records remain readable.
+A client-version tag cannot hold two different snapshots. If catalog inputs or
+generator code change for an already released version, publication fails without
+replacing its assets.
 
 The publisher compares content fingerprints before building. A new game version
 with identical inputs reuses an existing snapshot and only updates the version
@@ -97,7 +96,6 @@ source definitions as nested JSON objects, together with IDs and English names:
 
 ```json
 {
-  "schema_version": 2,
   "catalog": "abilities",
   "source_commit": "<full upstream SHA>",
   "client_version": "6698",
@@ -129,7 +127,7 @@ New properties and other fields are automatically retained in each nested
 `definition`; no hardcoded stat list is needed. Property values, scaling functions,
 provided properties, and modifier bindings remain at their source paths.
 New source syntax or changed gameplay semantics may still require a parser or
-interpretation update. Changes to the JSON envelope require schema versioning.
+interpretation update.
 
 ```python
 import json
@@ -145,9 +143,8 @@ print(leech["definition"]["m_mapAbilityProperties"]["BulletLifestealPercent"])
 
 ### Lookups and declared stat changes
 
-Catalog schema **6** uses JSON envelope schema **2**, keeping the same four catalog
-files and the original `records` arrays and `definition` objects. Each record now
-has a `record_key`, `source_file`, and `definition_path`. A record key combines the
+Each catalog contains `records` and lookup `indexes`. Each record retains its raw
+`definition` and has a `record_key`, `source_file`, and `definition_path`. A record key combines the
 source file and logical definition path, for example
 `abilities.vdata#/upgrade_vampire`. Path segments escape `~` as `~0` and `/` as
 `~1`; KV3 `$type`/`$value` wrappers are transparent in these logical paths.
@@ -228,11 +225,6 @@ for position in abilities["indexes"]["by_id"].get("499683006", []):
 positions = modifiers["indexes"]["by_qualified_id"].get("1373598984", [])
 candidates = [modifiers["records"][position] for position in positions]
 ```
-
-Older JSON schema 1 snapshots remain downloadable and have no indexes or extracted
-bindings. Published releases remain immutable; the new schema requires a new,
-unused client-version release. Local previews can be rebuilt in a new output
-folder without changing existing releases.
 
 ### misc.json
 
@@ -444,7 +436,7 @@ The JSON definitions retain these source fields without resolving them.
 
 ## Manifest format
 
-The JSON-only manifest has `schema_version: 2`:
+`manifest.json` records the source, generator, and output checksums:
 
 | Field | Meaning |
 | --- | --- |
@@ -462,21 +454,18 @@ The JSON-only manifest has `schema_version: 2`:
 | `artifacts` | Map of the four JSON catalogs to SHA-256 and byte count (the manifest itself is fingerprinted in the index) |
 | `snapshot.content_sha256` | Fingerprint of the four VData and five English localization input names, hashes, and sizes |
 | `snapshot.generator_sha256` | Fingerprint of the catalog/parser/packaging code, `pyproject.toml`, `uv.lock`, and installed Polars version |
-| `snapshot.dataset_sha256` | Fingerprint combining content, generator revision, and catalog schema version |
-| `catalogs.schema_version` | Catalog structure version; `6` adds lookup indexes and declared stat changes; schemas `4` and `5` remain readable |
+| `snapshot.dataset_sha256` | Fingerprint combining content and generator revision |
 | `catalogs.polars_version` | Polars version used by the catalog builder |
 | `catalogs.tables` | Empty in published manifests; row counts and column types when exporting local Parquet |
-| `catalogs.json_catalogs` | JSON envelope schema version and record count for each JSON catalog |
+| `catalogs.json_catalogs` | Record count for each JSON catalog |
 | `catalogs.vdata_metadata` | JSON-encoded root metadata from the four parsed VData files |
 
 Identifiers are strings; unavailable optional `steam.inf` fields are `null`.
 There is no inferred Steam build ID or demo build mapping. Packaging timestamps
 are omitted so rebuilding the same source with the same toolchain produces the
 same artifacts. Each client-version tag identifies one immutable snapshot.
-Manifest schema `2` replaces the earlier raw-archive contract. The publication
-timestamp lives in the version index, where it is recorded after GitHub publishes
-the verified release. Published assets are
-never replaced.
+The publication timestamp lives in the version index, where it is recorded after
+GitHub publishes the verified release. Published assets are never replaced.
 
 ## Publishing and change detection
 
@@ -489,7 +478,7 @@ supports manual runs with an upstream `ref`. Both use
    interrupted index update.
 2. Resolve and pin the requested upstream ref; download and verify its inputs.
 3. Compare the four VData file hashes and sizes with the latest indexed snapshot.
-   If unchanged, reuse that snapshot even if localization, generator code, schema,
+   If unchanged, reuse that snapshot even if localization, generator code,
    or dependencies changed. If there is no `latest` yet, compare with the most
    recently observed backfilled version; an empty index builds its first release.
 4. When VData changes, use the full dataset fingerprint to reuse an identical
@@ -508,17 +497,15 @@ supports manual runs with an upstream `ref`. Both use
    observations cannot replace a newer commit for the same client version.
 
 The gate compares file contents, not upstream commit IDs. Localization-only,
-metadata-only, generator/schema, lockfile, and lint-tool updates do not trigger
+metadata-only, generator, lockfile, and lint-tool updates do not trigger
 new releases in **Build boon-data**. Their changes are incorporated when the next
 VData change requires a build. Other upstream VData files do not trigger releases.
-The full content, generator, and schema fingerprints remain in the manifest for
+The full content and generator fingerprints remain in the manifest for
 provenance and exact snapshot reuse. GitHub's latest release follows the snapshot
 used by the latest indexed observation, even when that snapshot is reused.
 
-Snapshot entries in the index now retain the manifest's `files` hashes. Older
-published entries are upgraded automatically from their checksum-verified release
-manifests; no releases are replaced. A local preview index without these hashes
-must be refreshed from GitHub before using `--vdata-only`.
+Snapshot entries in the index retain the manifest's `files` hashes for the VData
+comparison.
 
 The default workflow needs only its built-in `GITHUB_TOKEN` with contents-write
 permission. The `data-index` branch is created on first publication. The index
@@ -583,8 +570,8 @@ gh workflow run backfill.yml --repo pnxenopoulos/boon-data \
   -f source_commit="<full-upstream-commit-sha>"
 ```
 
-The backfill workflow deliberately omits `--vdata-only`: it uses full content,
-generator, and schema matching for the requested historical snapshot. It reads
+The backfill workflow deliberately omits `--vdata-only`: it matches content and
+generator fingerprints for the requested historical snapshot. It reads
 `steam.inf`, all four VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
 source commit, client version, build date/time, and publication time in the index.
 New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
@@ -611,7 +598,7 @@ After publication, the index is available at:
 https://raw.githubusercontent.com/pnxenopoulos/boon-data/data-index/versions.json
 ```
 
-The index schema is `2`:
+`versions.json` contains:
 
 | Field | Meaning |
 | --- | --- |
@@ -626,7 +613,7 @@ Each `versions["6698"]` entry contains:
 | --- | --- |
 | `client_version` | `"6698"`, matching the map key |
 | `released_at` | UTC timestamp of the associated boon-data GitHub release, such as `"2026-09-21T16:00:00Z"` |
-| `artifacts` | All five JSON files in schema-5 releases (four in older releases), each with `url`, SHA-256 `sha256`, and byte count `bytes` |
+| `artifacts` | All five JSON files, each with `url`, SHA-256 `sha256`, and byte count `bytes` |
 | `snapshot` | Internal immutable release tag; users do not need to select it |
 | `source` | Observed upstream repository, full commit SHA, commit timestamp, and source path |
 | `server_version`, `source_revision`, `version_date`, `version_time` | Original game build metadata from `steam.inf` |
@@ -641,8 +628,7 @@ requested client version, rather than require it to match the snapshot's origin.
 There is one current entry per client version. An unchanged dataset can update
 its source observation without changing release assets. A different dataset
 cannot replace an existing client-version tag. Existing snapshots remain in
-`snapshots`, including historical hash-tagged releases, and earlier mappings
-remain in the index's Git history.
+`snapshots`, and earlier mappings remain in the index's Git history.
 
 ```python
 import json
