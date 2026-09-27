@@ -525,7 +525,7 @@ def main() -> None:
     parser.add_argument(
         "--vdata-only",
         action="store_true",
-        help="Reuse the latest snapshot when the four VData files are unchanged.",
+        help="Reuse the latest snapshot when the tracked VData files are unchanged.",
     )
     parser.add_argument("--output", type=Path, default=Path(".work/dist"))
     parser.add_argument(

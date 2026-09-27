@@ -1,0 +1,21 @@
+{
+    generic_data_type = "CEntitySubclassVDataBase"
+    npc_boss_tier2_weak = {
+        _class = "npc_boss_tier2"
+        m_FriendlyAuraModifier = subclass: {
+            _class = "modifier_base_aura"
+            _my_subclass_name = "friendly_aura"
+            m_iAuraSearchType = "CITADEL_UNIT_TARGET_HERO_FRIENDLY"
+            m_flAuraRadius = 1102.36
+            m_modifierProvidedByAura = subclass: {
+                _class = "modifier_base"
+                _my_subclass_name = "target_near_walker"
+                m_sLocalizationName = "modifier_walker_resist_aura"
+                m_vecScriptValues = [
+                    {m_eModifierValue = "MODIFIER_VALUE_TECH_RESIST" m_value = 15},
+                    {m_eModifierValue = "MODIFIER_VALUE_BULLET_ARMOR_DAMAGE_RESIST" m_value = 15},
+                ]
+            }
+        }
+    }
+}

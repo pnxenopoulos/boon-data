@@ -172,6 +172,7 @@ class PublisherTests(unittest.TestCase):
         for kind in (
             "vdata",
             "misc",
+            "npc",
             "localization",
             "property_addition",
             "property_removal",
@@ -185,6 +186,10 @@ class PublisherTests(unittest.TestCase):
                 elif kind == "misc":
                     inputs[0]["misc.vdata"] = inputs[0]["misc.vdata"].replace(
                         b"m_valueMax = 70.0", b"m_valueMax = 71.0"
+                    )
+                elif kind == "npc":
+                    inputs[0]["npc_units.vdata"] = inputs[0]["npc_units.vdata"].replace(
+                        b"m_value = 15", b"m_value = 16"
                     )
                 elif kind == "localization":
                     path = next(iter(inputs[1]))

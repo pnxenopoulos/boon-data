@@ -11,7 +11,7 @@ No game install, Steam login, VPK extraction tools, or map images are needed.
 
 Scripts and tests live on the default branch; the publisher maintains
 `versions.json` on a separate `data-index` branch. Generated bundles go under
-`.work/` and are ignored. This repository supplies the JSON catalogs and client-version index; consumption of the new misc catalog is separate.
+`.work/` and are ignored. This repository supplies the JSON catalogs and client-version index.
 
 ## Build a snapshot
 
@@ -35,13 +35,14 @@ The pipeline:
 
 1. Resolves the requested upstream ref to its full commit SHA.
 2. Reads `game/citadel/steam.inf` at that commit.
-3. Locates `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, and `misc.vdata` in
+3. Locates `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, `misc.vdata`,
+   and `npc_units.vdata` in
    `game/citadel/pak01_dir/scripts/` at the same commit.
-4. Downloads those four files and verifies their sizes and Git blob hashes
+4. Downloads those five files and verifies their sizes and Git blob hashes
    against the directory listing. Missing files are an error.
 5. Downloads and verifies the English hero, ability, item, modifier, and general UI
    localization files at the same commit.
-6. Parses the four catalog VData files, joins names, and writes JSON catalogs.
+6. Parses the five catalog VData files, joins names, and writes JSON catalogs.
 7. Writes `manifest.json` with provenance, game identifiers, catalog record counts,
    and SHA-256 hashes for every input and output file.
 
@@ -144,6 +145,14 @@ print(leech["definition"]["m_mapAbilityProperties"]["BulletLifestealPercent"])
 
 ### Lookups and declared stat changes
 
+Boon reads hero, ability/item, and modifier name maps from these catalogs.
+Python and Rust use the newest verified local installation, downloading latest
+when none is installed. Consumers can explicitly select a client version.
+Name maps use the IDs already present in records. Hero labels use `display_name`
+with `hero_name` as the fallback. Modifier lookups include both unqualified and
+owner-qualified names. Duplicate labels can share a map entry; the record
+indexes below retain every candidate definition for gameplay analysis.
+
 Each catalog contains `records` and lookup `indexes`. Each record retains its raw
 `definition` and has a `record_key`, `source_file`, and `definition_path`. A record key combines the
 source file and logical definition path, for example
@@ -229,11 +238,12 @@ candidates = [modifiers["records"][position] for position in positions]
 
 ### misc.json
 
-One record per top-level definition in `misc.vdata`, keyed by `misc_name`.
+One record per top-level definition in `misc.vdata` and `npc_units.vdata`, keyed
+by `misc_name`. `source_file` and `record_key` retain the original input file.
 `misc_id` is its unsigned Source 2 string token. `display_name` uses the explicit
 `m_sNameLocString` localization token when present, otherwise the definition name;
 missing English names stay null. The entire parsed `definition` is preserved,
-including temporary power-ups, permanent pickups, spawners, neutral camps,
+including temporary power-ups, permanent pickups, NPCs, spawners, neutral camps,
 breakable props, and definitions without an explicit `_class`.
 
 For client 6698, `gun_powerup_pickup` contains:
@@ -263,6 +273,17 @@ misc = json.loads((snapshot / "misc.json").read_text(encoding="utf-8"))
 gun = next(r for r in misc["records"] if r["misc_name"] == "gun_powerup_pickup")
 print(gun["definition"]["m_sModifer"]["$value"]["m_vecModifierValues"])
 ```
+
+NPC definitions share `misc.json` so the release still contains four catalogs.
+Their nested modifiers appear in `modifiers.json`, with `misc_name` and `misc_id`
+pointing to the NPC root. All effects keep their source paths and raw definitions.
+
+For example, the friendly Walker aura in snapshot 6694 has the qualified name
+`npc_boss_tier2_weak/friendly_aura/target_near_walker` and ID `1633171260`.
+Its `stat_changes` contain `MODIFIER_VALUE_TECH_RESIST=15` and
+`MODIFIER_VALUE_BULLET_ARMOR_DAMAGE_RESIST=15`, read from `m_vecScriptValues`.
+The parent aura retains its friendly-target filter and radius. These values are
+source bonuses; Boon must check aura state and apply the resistance rules.
 
 ## Optional local Parquet exports
 
@@ -371,7 +392,7 @@ For example, this snapshot exports Lash's
 
 One row per modifier definition **in its source context**. Includes all top-level
 entries in `modifiers.vdata`, plus named nested subclasses whose `_class` starts
-with `modifier_` in the ability, hero, modifier, and misc files.
+with `modifier_` in the ability, hero, modifier, misc, and NPC files.
 
 | Columns | Contents |
 | --- | --- |
@@ -382,6 +403,19 @@ with `modifier_` in the ability, hero, modifier, and misc files.
 | `bound_properties` | Properties named by `m_vecAutoRegisterModifierValueFromAbilityPropertyName`, resolved against the owning ability's property map |
 | `is_hidden`, `debuff_type` | Explicit source flags |
 | `stat_<field>` | Direct numeric modifier fields, such as a duration or scale |
+
+In both JSON and Parquet, `display_name` first uses the English translation of
+`modifier_name`. Only when that lookup is missing does it try the modifier's
+`m_sLocalizationName` token. If neither resolves, the label is null. Existing
+labels, including empty strings, remain unchanged: Spirit Snare's
+`modifier_glitch_debuff` retains "Cursed!", while `modifier_healing_Nova_active`
+can obtain "Healing Nova" through its fallback token. IDs and raw definitions
+are unaffected.
+
+Qualified modifier names include every containing subclass name. For example,
+`citadel_koth_cashin/modifier_aura_idol_cashin/target_near_idol_cashin` hashes to
+`3930103894`. Its JSON Pointer path still uses field names. The owner fields
+continue to identify the root ability, hero, or world definition.
 
 `modifier_id` is deliberately not a unique row key. Two items can use
 `modifier_intrinsic_base` with different bindings and values. Shared modifiers
@@ -429,7 +463,7 @@ print(
 )
 ```
 
-The catalogs preserve the fields exported in the four source files. They do
+The catalogs preserve the fields exported in the five source files. They do
 not reimplement engine defaults, resolve `_base`/`_multibase` inheritance, follow
 `_include` files, or extract modifiers from other VData categories. Base names
 remain on each row, and root include metadata remains in the manifest.
@@ -450,16 +484,16 @@ The JSON definitions retain these source fields without resolving them.
 | `client_version`, `server_version` | Values from `steam.inf` |
 | `source_revision` | Engine source revision from `steam.inf` |
 | `version_date`, `version_time` | Build timestamp strings from `steam.inf` |
-| `files` | Map of the four VData input filenames to `{ "sha256": "…", "bytes": N }` |
+| `files` | Map of the five VData input filenames to `{ "sha256": "…", "bytes": N }` |
 | `localization_files` | Map of upstream localization paths to SHA-256 and byte count |
 | `artifacts` | Map of the four JSON catalogs to SHA-256 and byte count (the manifest itself is fingerprinted in the index) |
-| `snapshot.content_sha256` | Fingerprint of the four VData and five English localization input names, hashes, and sizes |
+| `snapshot.content_sha256` | Fingerprint of the five VData and five English localization input names, hashes, and sizes |
 | `snapshot.generator_sha256` | Fingerprint of the catalog/parser/packaging code, `pyproject.toml`, `uv.lock`, and installed Polars version |
 | `snapshot.dataset_sha256` | Fingerprint combining content and generator revision |
 | `catalogs.polars_version` | Polars version used by the catalog builder |
 | `catalogs.tables` | Empty in published manifests; row counts and column types when exporting local Parquet |
 | `catalogs.json_catalogs` | Record count for each JSON catalog |
-| `catalogs.vdata_metadata` | JSON-encoded root metadata from the four parsed VData files |
+| `catalogs.vdata_metadata` | JSON-encoded root metadata from the five parsed VData files |
 
 Identifiers are strings; unavailable optional `steam.inf` fields are `null`.
 There is no inferred Steam build ID or demo build mapping. Packaging timestamps
@@ -479,7 +513,7 @@ supports manual runs with an upstream `ref`. Both use
    published before an interrupted index update. Only published releases can be
    reused; stale index entries for missing releases do not count.
 2. Resolve and pin the requested upstream ref; download and verify its inputs.
-3. Compare the four VData file hashes and sizes with the latest indexed snapshot.
+3. Compare the five VData file hashes and sizes with the latest indexed snapshot.
    If unchanged, reuse that snapshot even if localization, generator code,
    or dependencies changed. If there is no `latest` yet, compare with the most
    recently observed backfilled version. If that release is missing or the index
@@ -578,7 +612,7 @@ The backfill workflow deliberately omits `--vdata-only`: it compares all VData a
 localization inputs. An existing client version with matching inputs reuses its
 published snapshot across generator updates. For a new version, reuse requires
 matching both content and generator fingerprints. It reads
-`steam.inf`, all four VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
+`steam.inf`, all five VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
 source commit, client version, build date/time, and publication time in the index.
 New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
 Identical datasets reuse an existing snapshot; the historical client version is
@@ -676,12 +710,12 @@ its locally cached files to distinguish installed, missing, or outdated data.
 
 ## Boon integration
 
-Boon provides `boon versions` and `boon get` for JSON releases. Its downloader
-and calculation rules still need support for the new `misc.json` artifact.
+Boon provides `boon versions` and `boon get` for JSON releases, including
+`misc.json`. NPC data uses the existing release files.
 The CLI interface is:
 
 ```text
-boon versions          # client version, boon-data release timestamp, local status
+boon versions          # client version, source date/time, local status
 boon get 6698          # fetch the release JSON files for this client version
 boon get               # use versions.json's latest client version
 boon versions --local  # inspect the local cache without network access
@@ -690,8 +724,8 @@ boon versions --local  # inspect the local cache without network access
 The intended cache is `~/.boon/<client-version>/`, containing `abilities.json`,
 `heroes.json`, `modifiers.json`, `misc.json`, and `manifest.json`. The index provides the exact
 URLs and checksums needed to verify those downloads.
-The Boon consumer must support the release artifact set before downloading
-`misc.json`; this repository does not change Boon's downloader or calculations.
+Existing installations retain their published contents. These additions require
+a newly built release; updating the generator does not replace release assets.
 
 **A release's `ClientVersion` is not `demo.build`.** Matching a replay's header
 to the appropriate source snapshot remains separate work. The catalogs do not

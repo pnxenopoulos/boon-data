@@ -11,7 +11,14 @@ from pathlib import Path
 import polars as pl
 from keyvalues import parse, to_json, unwrap
 
-VDATA_FILES = ("abilities.vdata", "heroes.vdata", "modifiers.vdata", "misc.vdata")
+VDATA_FILES = (
+    "abilities.vdata",
+    "heroes.vdata",
+    "modifiers.vdata",
+    "misc.vdata",
+    "npc_units.vdata",
+)
+WORLD_FILES = ("misc.vdata", "npc_units.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
     for name in (
@@ -329,9 +336,9 @@ def add_lookups(payloads: dict[str, dict]) -> None:
         indexes = {name: {} for name in ("by_key", *fields)}
         for index, record in enumerate(payload["records"]):
             if catalog != "modifiers":
-                record["source_file"] = f"{catalog}.vdata"
-                record["definition_path"] = "/" + pointer_segment(
-                    record[f"{prefix}_name"]
+                record.setdefault("source_file", f"{catalog}.vdata")
+                record.setdefault(
+                    "definition_path", "/" + pointer_segment(record[f"{prefix}_name"])
                 )
             key = f"{record['source_file']}#{record['definition_path']}"
             if key in by_key:
@@ -493,15 +500,20 @@ def build_catalogs(
             {
                 "misc_name": name,
                 "misc_id": string_token(name),
+                "source_file": source_file,
+                "definition_path": "/" + pointer_segment(name),
                 "display_name": tokens.get(definition.get("m_sNameLocString", name)),
                 **definition_fields(definition),
                 **provenance,
             }
-            for name, definition in roots["misc.vdata"].items()
+            for source_file in WORLD_FILES
+            for name, definition in roots[source_file].items()
         ],
         {
             "misc_name": pl.String,
             "misc_id": pl.UInt32,
+            "source_file": pl.String,
+            "definition_path": pl.String,
             "display_name": pl.String,
             **DEFINITION,
             **PROVENANCE,
@@ -510,20 +522,21 @@ def build_catalogs(
 
     modifiers = []
 
-    def walk(value, path: str, source_file: str, owner: str, root: dict):
+    def walk(value, path: str, source_file: str, owner: str, root: dict, scope: str):
         value = unwrap(value)
         if isinstance(value, dict):
             is_root = (
                 path == "/" + pointer_segment(owner)
                 and source_file == "modifiers.vdata"
             )
+            if not is_root and (subclass_name := value.get("_my_subclass_name")):
+                scope = f"{scope}/{subclass_name}"
             if is_root or str(value.get("_class", "")).startswith("modifier_"):
                 name = owner if is_root else value.get("_my_subclass_name")
                 if name:
                     ability = owner if source_file == "abilities.vdata" else None
                     hero = owner if source_file == "heroes.vdata" else None
-                    misc = owner if source_file == "misc.vdata" else None
-                    qualified_name = name if is_root else f"{owner}/{name}"
+                    misc = owner if source_file in WORLD_FILES else None
                     bindings = value.get(
                         "m_vecAutoRegisterModifierValueFromAbilityPropertyName", []
                     )
@@ -531,9 +544,11 @@ def build_catalogs(
                         {
                             "modifier_name": name,
                             "modifier_id": string_token(name),
-                            "qualified_modifier_name": qualified_name,
-                            "qualified_modifier_id": string_token(qualified_name),
-                            "display_name": tokens.get(name),
+                            "qualified_modifier_name": scope,
+                            "qualified_modifier_id": string_token(scope),
+                            "display_name": tokens.get(
+                                name, tokens.get(value.get("m_sLocalizationName"))
+                            ),
                             "source_file": source_file,
                             "definition_path": path,
                             "ability_name": ability,
@@ -559,14 +574,21 @@ def build_catalogs(
             for key, child in sorted(value.items()):
                 # JSON Pointer paths identify repeated subclasses without conflating them.
                 segment = pointer_segment(key)
-                walk(child, f"{path}/{segment}", source_file, owner, root)
+                walk(child, f"{path}/{segment}", source_file, owner, root, scope)
         elif isinstance(value, list):
             for index, child in enumerate(value):
-                walk(child, f"{path}/{index}", source_file, owner, root)
+                walk(child, f"{path}/{index}", source_file, owner, root, scope)
 
     for source_file, entries in roots.items():
         for name, definition in entries.items():
-            walk(definition, "/" + pointer_segment(name), source_file, name, definition)
+            walk(
+                definition,
+                "/" + pointer_segment(name),
+                source_file,
+                name,
+                definition,
+                name,
+            )
     modifier_table = frame(
         modifiers,
         {
@@ -627,7 +649,13 @@ def build_catalogs(
             identity = {
                 "abilities": ("ability_name", "ability_id", "display_name"),
                 "heroes": ("hero_name", "hero_id", "display_name"),
-                "misc": ("misc_name", "misc_id", "display_name"),
+                "misc": (
+                    "misc_name",
+                    "misc_id",
+                    "display_name",
+                    "source_file",
+                    "definition_path",
+                ),
                 "modifiers": (
                     "modifier_name",
                     "modifier_id",

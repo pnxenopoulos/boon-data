@@ -83,6 +83,60 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(self.ability("ability_unlocalized")["disabled"])
         self.assertTrue(self.ability("item_base")["is_template"])
 
+    def test_modifier_localization_only_fills_missing_display_names(self):
+        self.localization = {
+            "english.txt": b'"lang" { "Tokens" {'
+            b'"modifier_glitch_debuff" "Cursed!" '
+            b'"spirit_snare" "Spirit Snare" '
+            b'"modifier_health_nova" "Healing Nova" '
+            b'"modifier_empty" "" } }'
+        }
+        expected = {
+            "modifier_glitch_debuff": "Cursed!",
+            "modifier_healing_Nova_active": "Healing Nova",
+            "modifier_unknown_token": None,
+            "modifier_no_token": None,
+            "modifier_empty": "",
+        }
+        for name, token in (
+            ("modifier_glitch_debuff", "spirit_snare"),
+            ("modifier_healing_Nova_active", "modifier_health_nova"),
+            ("modifier_unknown_token", "missing"),
+            ("modifier_no_token", None),
+            ("modifier_empty", "spirit_snare"),
+        ):
+            with self.subTest(name=name):
+                field = (
+                    f"m_sLocalizationName = {json.dumps(token)}"
+                    if token is not None
+                    else ""
+                )
+                self.vdata["modifiers.vdata"] = (
+                    '{ generic_data_type = "CModifierVData" modifier_test = {'
+                    '_class = "modifier_test" m_Child = subclass:{'
+                    '_class = "modifier_base" '
+                    f'_my_subclass_name = "{name}" {field}'
+                    "} } }"
+                ).encode()
+                catalogs.build_catalogs(
+                    self.vdata, self.localization, SOURCE, self.output, parquet=True
+                )
+                row = next(
+                    r
+                    for r in self.json_catalog("modifiers")["records"]
+                    if r["modifier_name"] == name
+                )
+                self.assertEqual(row["display_name"], expected[name])
+                self.assertEqual(row["modifier_id"], catalogs.string_token(name))
+                self.assertEqual(row["definition"].get("m_sLocalizationName"), token)
+                parquet = pl.read_parquet(self.output / "modifiers.parquet")
+                self.assertEqual(
+                    parquet.filter(pl.col("modifier_name") == name)
+                    .get_column("display_name")
+                    .item(),
+                    expected[name],
+                )
+
     def test_all_properties_survive_without_conflating_absence_and_zero(self):
         row = self.ability("upgrade_vampire")
         self.assertEqual(row["stat_AbilityDuration"], 0.0)
@@ -588,4 +642,100 @@ class CatalogTests(unittest.TestCase):
         self.assertNotEqual(
             rows["ammo_permanent_pickup"]["qualified_modifier_id"],
             rows["ammo_permanent_pickup_lv2"]["qualified_modifier_id"],
+        )
+
+    def test_npc_aura_lookup_keeps_source_context_and_declared_resistances(self):
+        misc = self.json_catalog("misc")
+        owner = misc["records"][misc["indexes"]["by_name"]["npc_boss_tier2_weak"][0]]
+        self.assertEqual(owner["source_file"], "npc_units.vdata")
+        self.assertEqual(owner["record_key"], "npc_units.vdata#/npc_boss_tier2_weak")
+        modifiers = self.json_catalog("modifiers")
+        row = modifiers["records"][
+            modifiers["indexes"]["by_qualified_id"]["1633171260"][0]
+        ]
+        self.assertEqual(
+            row["qualified_modifier_name"],
+            "npc_boss_tier2_weak/friendly_aura/target_near_walker",
+        )
+        self.assertEqual(row["misc_id"], owner["misc_id"])
+        self.assertIn(row["record_key"], owner["modifier_keys"])
+        self.assertIsNone(row["ability_id"])
+        self.assertEqual(
+            {c["stat"]: c["value"] for c in row["stat_changes"]},
+            {
+                "MODIFIER_VALUE_TECH_RESIST": 15,
+                "MODIFIER_VALUE_BULLET_ARMOR_DAMAGE_RESIST": 15,
+            },
+        )
+        for effect in row["stat_changes"]:
+            self.assertEqual(effect["source_record_key"], row["record_key"])
+            self.assertTrue(
+                effect["definition_path"].startswith(
+                    row["definition_path"] + "/m_vecScriptValues/"
+                )
+            )
+        aura = owner["definition"]["m_FriendlyAuraModifier"]["$value"]
+        self.assertEqual(aura["m_iAuraSearchType"], "CITADEL_UNIT_TARGET_HERO_FRIENDLY")
+        self.assertEqual(aura["m_flAuraRadius"], 1102.36)
+        self.assertIn("npc_units.vdata", self.metadata["vdata_metadata"])
+
+        self.vdata["npc_units.vdata"] = self.vdata["npc_units.vdata"].replace(
+            b"m_value = 15", b"m_value = 23"
+        )
+        catalogs.build_catalogs(self.vdata, self.localization, SOURCE, self.output)
+        changed = self.json_catalog("modifiers")
+        row = changed["records"][changed["indexes"]["by_qualified_id"]["1633171260"][0]]
+        self.assertEqual([c["value"] for c in row["stat_changes"]], [23, 23])
+
+    def test_nested_modifier_hashes_include_all_subclass_ancestors(self):
+        self.vdata["misc.vdata"] = b"""{
+            citadel_koth_cashin = {
+                m_AuraModifier = subclass:{
+                    _class="modifier_base_aura_cylinder"
+                    _my_subclass_name="modifier_aura_idol_cashin"
+                    m_modifierProvidedByAura = subclass:{
+                        _class="modifier_idol_cashin_timer"
+                        _my_subclass_name="target_near_idol_cashin"
+                    }
+                }
+                m_OtherAura = subclass:{
+                    _class="modifier_base_aura_cylinder"
+                    _my_subclass_name="other_aura"
+                    m_modifierProvidedByAura = subclass:{
+                        _class="modifier_idol_cashin_timer"
+                        _my_subclass_name="target_near_idol_cashin"
+                    }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(
+            self.vdata, self.localization, SOURCE, self.output, parquet=True
+        )
+        payload = self.json_catalog("modifiers")
+        row = payload["records"][payload["indexes"]["by_qualified_id"]["3930103894"][0]]
+        self.assertEqual(
+            row["qualified_modifier_name"],
+            "citadel_koth_cashin/modifier_aura_idol_cashin/target_near_idol_cashin",
+        )
+        self.assertEqual(
+            row["definition_path"],
+            "/citadel_koth_cashin/m_AuraModifier/m_modifierProvidedByAura",
+        )
+        shared = payload["indexes"]["by_id"][
+            str(catalogs.string_token("target_near_idol_cashin"))
+        ]
+        self.assertEqual(len(shared), 2)
+        self.assertEqual(
+            len({payload["records"][i]["qualified_modifier_id"] for i in shared}), 2
+        )
+        self.assertNotIn(
+            str(catalogs.string_token("citadel_koth_cashin/target_near_idol_cashin")),
+            payload["indexes"]["by_qualified_id"],
+        )
+        table = pl.read_parquet(self.output / "modifiers.parquet")
+        self.assertEqual(
+            table.filter(pl.col("qualified_modifier_id") == 3930103894)[
+                "qualified_modifier_name"
+            ].item(),
+            row["qualified_modifier_name"],
         )
