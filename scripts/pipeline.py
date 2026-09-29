@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
-from catalogs import LOCALIZATION_FILES, VDATA_FILES, build_catalogs
+from catalogs import LOCALIZATION_FILES, SCHEMA_FILES, VDATA_FILES, build_catalogs
 from keyvalues import to_json
 
 SOURCE_REPO = "SteamTracking/GameTracking-Deadlock"
@@ -98,8 +98,19 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
     localization_files = {
         name: fingerprint(localization[name]) for name in sorted(LOCALIZATION_FILES)
     }
+    schema_files = {
+        name: fingerprint(localization[name])
+        for name in SCHEMA_FILES
+        if name in localization
+    }
     content_hash = fingerprint(
-        to_json({"files": files, "localization_files": localization_files}).encode()
+        to_json(
+            {
+                "files": files,
+                "localization_files": localization_files,
+                **({"schema_files": schema_files} if schema_files else {}),
+            }
+        ).encode()
     )["sha256"]
     identity = {
         "content_sha256": content_hash,
@@ -111,6 +122,7 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
         "release_key": source["client_version"],
         "files": files,
         "localization_files": localization_files,
+        "schema_files": schema_files,
         "snapshot": {**identity, "dataset_sha256": dataset_hash},
     }
 
@@ -157,7 +169,11 @@ def download_inputs(source: dict) -> tuple[dict[str, bytes], dict[str, bytes]]:
         contents = dict(
             pool.map(download_vdata, sorted(entries, key=lambda e: e["name"]))
         )
-        localization = dict(pool.map(download_localization, sorted(LOCALIZATION_FILES)))
+        localization = dict(
+            pool.map(
+                download_localization, sorted((*LOCALIZATION_FILES, *SCHEMA_FILES))
+            )
+        )
     return contents, localization
 
 
@@ -167,7 +183,11 @@ def build(
     """Build deterministic artifacts and preserve any already-built snapshot."""
     contents, localization = download_inputs(source) if inputs is None else inputs
     contents = {name: contents[name] for name in sorted(REQUIRED_FILES)}
-    localization = {name: localization[name] for name in sorted(LOCALIZATION_FILES)}
+    localization = {
+        name: localization[name]
+        for name in sorted((*LOCALIZATION_FILES, *SCHEMA_FILES))
+        if name in localization
+    }
     source = snapshot_metadata(source, contents, localization)
     output.mkdir(parents=True, exist_ok=True)
     destination = output / source["release_key"]

@@ -18,6 +18,9 @@ VDATA_FILES = (
     "misc.vdata",
     "npc_units.vdata",
 )
+MODIFIER_ENUM_FILE = "DumpSource2/schemas/client/EModifierValue.h"
+MODIFIER_STATE_ENUM_FILE = "DumpSource2/schemas/client/EModifierState.h"
+SCHEMA_FILES = (MODIFIER_ENUM_FILE, MODIFIER_STATE_ENUM_FILE)
 WORLD_FILES = ("misc.vdata", "npc_units.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
@@ -110,6 +113,7 @@ def property_rows(properties: dict, names=None) -> list[dict]:
                 else None,
                 "provided_property": fields.get("m_eProvidedPropertyType"),
                 "usage_flags": fields.get("m_eStatsUsageFlags"),
+                "apply_filter": fields.get("m_eApplyFilter"),
                 "display_type": fields.get("m_eDisplayType"),
                 "display_units": fields.get("m_eDisplayUnits"),
                 "definition_json": to_json(definition)
@@ -281,6 +285,7 @@ def json_properties(record: dict) -> dict:
             "raw_value": fields.get("m_strValue"),
             "stat": fields.get("m_eProvidedPropertyType"),
             "usage_flags": fields.get("m_eStatsUsageFlags"),
+            "apply_filter": fields.get("m_eApplyFilter"),
             "display_units": fields.get("m_eDisplayUnits"),
             "scaling": fields.get("m_subclassScaleFunction"),
             "source_record_key": record["record_key"],
@@ -400,6 +405,115 @@ def add_lookups(payloads: dict[str, dict]) -> None:
                     }
                 )
 
+    add_runtime_bindings(payloads, by_key)
+
+
+def add_bloodscent_counter(ability: dict) -> None:
+    """Bind the owner's recorded rewards; never attach them to target markers."""
+    if ability["definition"].get("_class") != "ability_drifter_hunger":
+        return
+    prop = ability["properties"].get("WeaponDmgPerIsolationKill")
+    assist = ability["properties"].get("IsolationAssistPercentValue")
+    if (
+        prop is None
+        or prop["stat"] != "MODIFIER_VALUE_WEAPON_DAMAGE_INCREASE"
+        or prop["modifier_keys"]
+        or assist is None
+    ):
+        return
+    # Curated interpretation, not an explicit VData registration. The matching
+    # server schema networks both earned counters; localization describes a
+    # permanent reward on isolated hero death. Interpret the assist percentage
+    # as its reward weight. Keep this assumption visible and all amounts in data.
+    # Verified source: GameTracking-Deadlock 19022f397ce9ba65856752d0cbaa82e80a2da73f.
+    binding = {
+        "binding_source": "curated",
+        "runtime_counts": [
+            {"field": "m_nKillsEarned"},
+            {
+                "field": "m_nAssistsEarned",
+                "percent": {"property_name": "IsolationAssistPercentValue", **assist},
+            },
+        ],
+    }
+    prop.update(binding)
+    for effect in ability["stat_changes"]:
+        if effect.get("property_name") == "WeaponDmgPerIsolationKill":
+            effect.update(binding)
+
+
+def add_runtime_bindings(payloads: dict[str, dict], by_key: dict[str, dict]) -> None:
+    """Add curated counter semantics separately from the unchanged VData definition."""
+    for ability in payloads["abilities"]["records"]:
+        add_bloodscent_counter(ability)
+        if ability["definition"].get("_class") != "upgrade_trophy_collector":
+            continue
+        modifier = by_key.get(f"{ability['record_key']}/m_GoldModifier")
+        prop = ability["properties"].get("StackingBonusSprintSpeed")
+        if (
+            modifier is None
+            or modifier["definition"].get("_class") != "modifier_trophy_collector"
+            or prop is None
+        ):
+            continue
+        # Curated engine relationship, not a VData registration: the ability's
+        # replicated trophy count multiplies this property while its gold
+        # modifier is active. Keep the amount and upgrades in the source data.
+        prop.update(
+            stat="MODIFIER_VALUE_SPRINT_SPEED_BONUS",
+            runtime_count="m_iTrophyCount",
+            binding_source="curated",
+            modifier_keys=[modifier["record_key"]],
+        )
+        effect = {
+            "kind": "runtime_property",
+            "property_name": "StackingBonusSprintSpeed",
+            **prop,
+        }
+        ability["stat_changes"].append(effect)
+        modifier["stat_changes"].append(effect.copy())
+        modifier["property_bindings"].append(
+            {
+                "property_name": "StackingBonusSprintSpeed",
+                "source_record_key": ability["record_key"],
+                "status": "resolved",
+                "binding_source": "curated",
+                "property": {k: v for k, v in prop.items() if k != "modifier_keys"},
+            }
+        )
+
+
+def _modifier_enum(
+    source: bytes, prefix: str, excluded: tuple[str, ...] = ()
+) -> dict[str, str]:
+    """Read explicit engine ordinals; never infer a missing enum value."""
+    result = {}
+    for name, value in re.findall(
+        rf"\b({prefix}\w+)\s*=\s*(0x[0-9a-fA-F]+|[0-9]+)\s*,?",
+        source.decode("utf-8-sig"),
+    ):
+        if name in excluded:
+            continue
+        key = str(int(value, 0) if value.startswith("0x") else int(value))
+        if key in result and result[key] != name:
+            raise ValueError(f"ambiguous modifier enum: {key}")
+        result[key] = name
+    if source and not result:
+        raise ValueError("modifier schema has no explicit enum values")
+    return result
+
+
+def modifier_value_types(source: bytes) -> dict[str, str]:
+    """Map modifier value ordinals to their engine names."""
+    return _modifier_enum(source, "MODIFIER_VALUE_")
+
+
+def modifier_states(source: bytes) -> dict[str, str]:
+    """Map state bit indices to engine names, excluding enum sentinels."""
+    return _modifier_enum(
+        source, "MODIFIER_STATE_", ("MODIFIER_STATE_COUNT", "MODIFIER_STATE_INVALID")
+    )
+
 
 def build_catalogs(
     vdata: dict[str, bytes],
@@ -412,7 +526,9 @@ def build_catalogs(
     """Write JSON definitions, optionally adding local Parquet exports."""
     documents = {name: parse(vdata[name].decode("utf-8-sig")) for name in VDATA_FILES}
     roots = {name: definitions(document) for name, document in documents.items()}
-    tokens = localization_tokens(localization)
+    tokens = localization_tokens(
+        {k: v for k, v in localization.items() if k not in SCHEMA_FILES}
+    )
     provenance = {
         "source_commit": source["source"]["commit"],
         "client_version": source["client_version"],
@@ -531,7 +647,9 @@ def build_catalogs(
             )
             if not is_root and (subclass_name := value.get("_my_subclass_name")):
                 scope = f"{scope}/{subclass_name}"
-            if is_root or str(value.get("_class", "")).startswith("modifier_"):
+            if is_root or str(value.get("_class", "")).startswith(
+                ("modifier_", "citadel_modifier_")
+            ):
                 name = owner if is_root else value.get("_my_subclass_name")
                 if name:
                     ability = owner if source_file == "abilities.vdata" else None
@@ -686,6 +804,14 @@ def build_catalogs(
             }
             json_metadata[f"{name}.json"] = {"records": len(records)}
     add_lookups(payloads)
+    # Network enum ordinals change between builds. Preserve the names from the
+    # same source revision rather than embedding ordinal tables in consumers.
+    payloads["abilities"]["modifier_value_types"] = modifier_value_types(
+        localization.get(MODIFIER_ENUM_FILE, b"")
+    )
+    payloads["modifiers"]["modifier_states"] = modifier_states(
+        localization.get(MODIFIER_STATE_ENUM_FILE, b"")
+    )
     for name, payload in payloads.items():
         (output / f"{name}.json").write_text(to_json(payload) + "\n", encoding="utf-8")
     return {

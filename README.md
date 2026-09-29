@@ -392,7 +392,9 @@ For example, this snapshot exports Lash's
 
 One row per modifier definition **in its source context**. Includes all top-level
 entries in `modifiers.vdata`, plus named nested subclasses whose `_class` starts
-with `modifier_` in the ability, hero, modifier, misc, and NPC files.
+with `modifier_` or `citadel_modifier_` in the ability, hero, modifier, misc, and
+NPC files. This includes nested Ivy tether modifiers and their explicit property
+bindings.
 
 | Columns | Contents |
 | --- | --- |
@@ -768,3 +770,63 @@ with Python 3.13.
 The build scripts are MIT licensed. The upstream game data remains Valve's;
 this repository does not grant a license to Valve's game assets. Source
 provenance is included in every bundle.
+
+### Curated runtime bindings
+
+Trophy Collector links `StackingBonusSprintSpeed` to the ability entity's
+`m_iTrophyCount` while `m_GoldModifier` is active. This engine relationship is
+explicitly declared in `scripts/catalogs.py`; it is not a VData registration.
+The exported property and stat change have `binding_source: "curated"` and
+`runtime_count: "m_iTrophyCount"`. Consumers multiply the selected catalog's
+property value, with its upgrades, by the recorded count. No balance value or
+item ID is embedded in this binding. The raw `definition` remains unchanged.
+
+Bloodscent uses an owner-only `runtime_counts` binding. Each term gives an ability
+entity `field`; an optional `percent` contains a catalog property that weights
+that count. The effective count is the sum of `count * percent / 100`, with
+100% for an unweighted term. Multiply that count by the effect's property value.
+
+The binding uses `m_nKillsEarned` and `m_nAssistsEarned`, with the latter weighted
+by `IsolationAssistPercentValue`. The amount comes from
+`WeaponDmgPerIsolationKill`. It applies while the player owns the ability; it
+requires no nearby target marker. Neither the amount nor the assist weight is
+fixed in the binding. Ability upgrades remain available in the catalog.
+
+This is a curated interpretation: the
+[matching server schema](https://github.com/SteamTracking/GameTracking-Deadlock/blob/19022f397ce9ba65856752d0cbaa82e80a2da73f/DumpSource2/schemas/server/CCitadel_Ability_Drifter_Hunger.h)
+confirms both recorded counters, and localization describes the permanent reward.
+It does not expose the engine equation. Raw definitions remain unchanged.
+
+
+### Ability targeting and network stat types
+
+Normalized properties and bound stat changes retain `apply_filter` from
+`m_eApplyFilter`. Consumers can distinguish global bonuses from effects restricted
+to an imbued ability or to abilities with charges. Unknown filters remain in the
+data; a consumer must not assume that they mean a global effect.
+
+`abilities.json` also has a `modifier_value_types` object. It maps decimal network
+enum IDs to `MODIFIER_VALUE_*` names from
+`DumpSource2/schemas/client/EModifierValue.h` at the same source commit. This lets
+consumers decode recorded dynamic ability values without embedding version-specific
+numeric maps. The source file is verified against its Git blob. `schema_files`
+in the manifest records its SHA-256 and size, and the content fingerprint includes
+it. Scheduled change detection still uses the tracked VData files.
+
+The JSON files do not decide whether a next-cast effect is ready or active. That
+requires replay state. Effect values, targeting filters, and engine enum names
+are data; activation and stacking rules belong in the consumer.
+
+### Player state names
+
+`modifiers.json` includes `modifier_states`, a map from decimal bit indices to
+`MODIFIER_STATE_*` names. The map comes from
+`DumpSource2/schemas/client/EModifierState.h` at the snapshot's source commit.
+It excludes `MODIFIER_STATE_COUNT` and `MODIFIER_STATE_INVALID`. The build verifies
+the source Git blob and records its size and SHA-256 in `schema_files`. Changes
+to this file affect the content fingerprint. Scheduled checks still use the
+tracked VData files.
+
+Consumers can use this map to decode a pawn's enabled, disabled, and predicted
+state masks. The catalog does not decide which mask takes priority or supply
+the magnitude of an effect. State names and bit indices are version-specific.

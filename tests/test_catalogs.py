@@ -18,6 +18,21 @@ SOURCE: dict = {"source": {"commit": "a" * 40}, "client_version": "1234"}
 
 
 class CatalogTests(unittest.TestCase):
+    def test_modifier_state_enum_preserves_indices_and_omits_sentinels(self):
+        from catalogs import modifier_states
+
+        self.assertEqual(
+            modifier_states(
+                b"MODIFIER_STATE_Z = 0x22, MODIFIER_STATE_A = 7, MODIFIER_STATE_COUNT = 35, MODIFIER_STATE_INVALID = 65535,"
+            ),
+            {"34": "MODIFIER_STATE_Z", "7": "MODIFIER_STATE_A"},
+        )
+        self.assertEqual(modifier_states(b""), {})
+        with self.assertRaises(ValueError):
+            modifier_states(b"MODIFIER_STATE_A = 2, MODIFIER_STATE_B = 2,")
+        with self.assertRaises(ValueError):
+            modifier_states(b"unexpected schema")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -55,6 +70,87 @@ class CatalogTests(unittest.TestCase):
         )
         for path in output.iterdir():
             self.assertEqual(path.read_bytes(), (self.output / path.name).read_bytes())
+
+    def test_curated_counter_binding_preserves_source_values(self):
+        payloads = {
+            name: json.loads((self.output / f"{name}.json").read_text())
+            for name in ("abilities", "heroes", "modifiers", "misc")
+        }
+        ability = payloads["abilities"]["records"][0]
+        ability["definition"]["_class"] = "upgrade_trophy_collector"
+        ability["definition"].setdefault("m_mapAbilityProperties", {})[
+            "StackingBonusSprintSpeed"
+        ] = {"m_strValue": "0.27m"}
+        modifier: dict = {
+            "source_file": "abilities.vdata",
+            "definition_path": ability["definition_path"] + "/m_GoldModifier",
+            "definition": {"_class": "modifier_trophy_collector"},
+            "modifier_name": "test_counter",
+            "modifier_id": 123,
+            "qualified_modifier_name": "test/counter",
+            "qualified_modifier_id": 456,
+        }
+        payloads["modifiers"]["records"].append(modifier)
+        original = json.dumps(ability["definition"], sort_keys=True)
+        catalogs.add_lookups(payloads)
+        effect = next(
+            row for row in modifier["stat_changes"] if row["kind"] == "runtime_property"
+        )
+        self.assertEqual(effect["raw_value"], "0.27m")
+        self.assertEqual(effect["runtime_count"], "m_iTrophyCount")
+        self.assertEqual(effect["stat"], "MODIFIER_VALUE_SPRINT_SPEED_BONUS")
+        self.assertEqual(effect["binding_source"], "curated")
+        self.assertEqual(effect["modifier_keys"], [modifier["record_key"]])
+        self.assertIn(effect, ability["stat_changes"])
+        self.assertEqual(json.dumps(ability["definition"], sort_keys=True), original)
+        # A changed engine class must not inherit an unrelated counter rule.
+        modifier["definition"]["_class"] = "different_modifier"
+        catalogs.add_lookups(payloads)
+        self.assertFalse(
+            any(row["kind"] == "runtime_property" for row in modifier["stat_changes"])
+        )
+
+    def test_bloodscent_counters_are_owner_only_and_preserve_catalog_amounts(self):
+        payloads = {
+            name: json.loads((self.output / f"{name}.json").read_text())
+            for name in ("abilities", "heroes", "modifiers", "misc")
+        }
+        ability = payloads["abilities"]["records"][0]
+        ability["definition"]["_class"] = "ability_drifter_hunger"
+        ability["definition"]["m_mapAbilityProperties"] = {
+            "WeaponDmgPerIsolationKill": {
+                "m_strValue": "7.5",
+                "m_eProvidedPropertyType": "MODIFIER_VALUE_WEAPON_DAMAGE_INCREASE",
+                "m_eStatsUsageFlags": "ConditionallyApplied",
+            },
+            "IsolationAssistPercentValue": {"m_strValue": "40"},
+        }
+        original = json.dumps(ability["definition"], sort_keys=True)
+        catalogs.add_lookups(payloads)
+        effect = next(
+            row
+            for row in ability["stat_changes"]
+            if row.get("property_name") == "WeaponDmgPerIsolationKill"
+        )
+        self.assertEqual(effect["value"], 7.5)
+        self.assertEqual(effect["binding_source"], "curated")
+        self.assertEqual(effect["runtime_counts"][0], {"field": "m_nKillsEarned"})
+        self.assertEqual(effect["runtime_counts"][1]["field"], "m_nAssistsEarned")
+        self.assertEqual(effect["runtime_counts"][1]["percent"]["value"], 40)
+        self.assertEqual(effect["modifier_keys"], [])
+        self.assertFalse(
+            any(
+                "runtime_counts" in row
+                for modifier in payloads["modifiers"]["records"]
+                for row in modifier["stat_changes"]
+            )
+        )
+        self.assertEqual(json.dumps(ability["definition"], sort_keys=True), original)
+        ability["definition"]["_class"] = "unrelated_ability"
+        catalogs.add_lookups(payloads)
+        self.assertFalse(
+            any("runtime_counts" in row for row in ability["stat_changes"])
+        )
 
     def ability(self, name):
         return self.abilities.filter(pl.col("ability_name") == name).row(0, named=True)
@@ -687,6 +783,44 @@ class CatalogTests(unittest.TestCase):
         row = changed["records"][changed["indexes"]["by_qualified_id"]["1633171260"][0]]
         self.assertEqual([c["value"] for c in row["stat_changes"]], [23, 23])
 
+    def test_citadel_modifier_prefix_keeps_nested_property_bindings(self):
+        self.vdata["abilities.vdata"] = b"""{
+            test_tether = {
+                m_mapAbilityProperties = {
+                    BonusFireRate = {
+                        m_strValue="10"
+                        m_eProvidedPropertyType="MODIFIER_VALUE_FIRE_RATE"
+                        m_eStatsUsageFlags="ConditionallyApplied"
+                    }
+                }
+                m_TetherModifier = subclass:{
+                    _class="citadel_modifier_test_tether"
+                    _my_subclass_name="tether"
+                    m_BuffModifier = subclass:{
+                        _class="citadel_modifier_test_receiver"
+                        _my_subclass_name="receiver"
+                        m_vecAutoRegisterModifierValueFromAbilityPropertyName=["BonusFireRate"]
+                    }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(self.vdata, self.localization, SOURCE, self.output)
+        modifiers = self.json_catalog("modifiers")
+        row = modifiers["records"][
+            modifiers["indexes"]["by_qualified_name"]["test_tether/tether/receiver"][0]
+        ]
+        ability = self.json_catalog("abilities")["records"][0]
+        self.assertEqual(row["ability_id"], ability["ability_id"])
+        self.assertEqual(
+            row["qualified_modifier_id"],
+            catalogs.string_token("test_tether/tether/receiver"),
+        )
+        self.assertEqual(row["stat_changes"][0]["stat"], "MODIFIER_VALUE_FIRE_RATE")
+        self.assertEqual(row["stat_changes"][0]["value"], 10)
+        self.assertEqual(
+            ability["properties"]["BonusFireRate"]["modifier_keys"], [row["record_key"]]
+        )
+
     def test_nested_modifier_hashes_include_all_subclass_ancestors(self):
         self.vdata["misc.vdata"] = b"""{
             citadel_koth_cashin = {
@@ -739,3 +873,49 @@ class CatalogTests(unittest.TestCase):
             ].item(),
             row["qualified_modifier_name"],
         )
+
+
+class AbilityScopeTests(unittest.TestCase):
+    def test_property_filter_is_retained(self):
+        from catalogs import json_properties
+
+        record = {
+            "record_key": "abilities.vdata#/invented",
+            "definition_path": "/invented",
+            "definition": {
+                "m_mapAbilityProperties": {
+                    "Range": {
+                        "m_strValue": "17",
+                        "m_eProvidedPropertyType": "MODIFIER_VALUE_TECH_RANGE_PERCENT",
+                        "m_eApplyFilter": "EApplyFilter_OnlyIfImbued",
+                    },
+                    "Cooldown": {
+                        "m_strValue": "9",
+                        "m_eApplyFilter": "EApplyFilter_OnlyIfHasCharges",
+                    },
+                }
+            },
+        }
+        result = json_properties(record)
+        self.assertEqual(result["Range"]["apply_filter"], "EApplyFilter_OnlyIfImbued")
+        self.assertEqual(
+            result["Cooldown"]["apply_filter"], "EApplyFilter_OnlyIfHasCharges"
+        )
+
+    def test_network_stat_enum_uses_source_numbers(self):
+        from catalogs import modifier_value_types
+
+        self.assertEqual(
+            modifier_value_types(
+                b"enum X { MODIFIER_VALUE_TECH_RANGE_PERCENT = 918, MODIFIER_VALUE_TECH_RADIUS_PERCENT = 0xABC, };"
+            ),
+            {
+                "918": "MODIFIER_VALUE_TECH_RANGE_PERCENT",
+                "2748": "MODIFIER_VALUE_TECH_RADIUS_PERCENT",
+            },
+        )
+        self.assertEqual(modifier_value_types(b""), {})
+        with self.assertRaises(ValueError):
+            modifier_value_types(b"unexpected schema")
+        with self.assertRaises(ValueError):
+            modifier_value_types(b"MODIFIER_VALUE_A = 5, MODIFIER_VALUE_B = 5,")

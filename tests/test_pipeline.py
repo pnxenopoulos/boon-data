@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import pipeline
+from catalogs import MODIFIER_ENUM_FILE, MODIFIER_STATE_ENUM_FILE
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -32,6 +33,22 @@ SOURCE: dict = {
 
 
 class PipelineTests(unittest.TestCase):
+    def test_state_enum_is_versioned_and_changes_content_hash(self):
+        source = pipeline.resolve_source("main")
+        first = pipeline.build(source, self.output)
+        manifest = json.loads((first / "manifest.json").read_text())
+        catalog = json.loads((first / "modifiers.json").read_text())
+        self.assertEqual(catalog["modifier_states"], {"19": "MODIFIER_STATE_SPRINTING"})
+        self.localization[MODIFIER_STATE_ENUM_FILE] = (
+            b"enum EModifierState { MODIFIER_STATE_SPRINTING = 21, };"
+        )
+        second = pipeline.build(source, self.output / "changed")
+        changed = json.loads((second / "manifest.json").read_text())
+        self.assertNotEqual(
+            manifest["snapshot"]["content_sha256"],
+            changed["snapshot"]["content_sha256"],
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -43,6 +60,12 @@ class PipelineTests(unittest.TestCase):
             name: (FIXTURES / "english.txt").read_bytes()
             for name in pipeline.LOCALIZATION_FILES
         }
+        self.localization[MODIFIER_ENUM_FILE] = (
+            b"enum EModifierValue { MODIFIER_VALUE_TECH_RANGE_PERCENT = 918, };"
+        )
+        self.localization[MODIFIER_STATE_ENUM_FILE] = (
+            b"enum EModifierState { MODIFIER_STATE_SPRINTING = 19, MODIFIER_STATE_COUNT = 20, };"
+        )
         self.contents["new_data.vdata"] = b"{ value = 0.25 }\n"
         self.entries = [
             {
@@ -127,6 +150,7 @@ class PipelineTests(unittest.TestCase):
             {
                 name: pipeline.fingerprint(data)
                 for name, data in self.localization.items()
+                if name in pipeline.LOCALIZATION_FILES
             },
         )
         self.assertTrue(all(SHA in url for url in self.urls))
@@ -157,6 +181,27 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             original, {p.name: p.read_bytes() for p in directory.iterdir()}
         )
+
+    def test_enum_schema_is_pinned_and_changes_catalog_fingerprint(self):
+        directory = pipeline.build(SOURCE, self.output)
+        manifest = json.loads((directory / "manifest.json").read_text())
+        self.assertEqual(
+            manifest["schema_files"],
+            {
+                name: pipeline.fingerprint(self.localization[name])
+                for name in pipeline.SCHEMA_FILES
+            },
+        )
+        catalog = json.loads((directory / "abilities.json").read_text())
+        self.assertEqual(
+            catalog["modifier_value_types"],
+            {"918": "MODIFIER_VALUE_TECH_RANGE_PERCENT"},
+        )
+        self.localization[MODIFIER_ENUM_FILE] = (
+            b"enum EModifierValue { MODIFIER_VALUE_TECH_RANGE_PERCENT = 920, };"
+        )
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
+            pipeline.build(SOURCE, self.output)
 
     def test_missing_required_file_does_not_publish_partial_bundle(self):
         self.entries = [
