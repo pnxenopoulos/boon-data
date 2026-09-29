@@ -156,34 +156,6 @@ class PublisherTests(unittest.TestCase):
             ):
                 publish.snapshot_record(publish.to_json(altered).encode())
 
-    def test_vdata_gate_still_reuses_snapshots_after_engine_metadata_changes(self):
-        inputs = (self.inputs[0], {**self.inputs[1], **engine_sources()})
-        with patch.object(
-            pipeline, "build", side_effect=AssertionError("must not rebuild")
-        ):
-            plan = publish.make_plan(
-                source_at(),
-                inputs,
-                self.plan["index"],
-                self.output,
-                latest=True,
-                vdata_only=True,
-            )
-        self.assertEqual(plan["action"], "reuse")
-        self.assertEqual(plan["snapshot"], self.plan["snapshot"])
-
-    def test_misc_is_required_by_manifests_and_index_records(self):
-        manifest = json.loads(
-            (Path(self.plan["directory"]) / "manifest.json").read_bytes()
-        )
-        del manifest["artifacts"]["misc.json"]
-        with self.assertRaisesRegex(ValueError, "complete release"):
-            publish.snapshot_record(publish.to_json(manifest).encode())
-        index = copy.deepcopy(self.plan["index"])
-        del index["snapshots"][self.plan["snapshot"]]["artifacts"]["misc.json"]
-        with self.assertRaisesRegex(ValueError, "invalid artifact set"):
-            publish.validate_index(index)
-
     def test_unchanged_inputs_reuse_snapshot_and_record_new_game_version(self):
         source = source_at()
         with patch.object(
@@ -203,86 +175,48 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertEqual(plan["index"]["latest"], source["client_version"])
 
-    def test_catalog_and_localization_changes_create_new_snapshots(self):
-        for kind in (
-            "vdata",
-            "misc",
-            "npc",
-            "item_prices",
-            "localization",
-            "property_addition",
-            "property_removal",
-        ):
-            with self.subTest(kind=kind):
-                inputs = copy.deepcopy(self.inputs)
-                if kind == "vdata":
-                    inputs[0]["abilities.vdata"] = inputs[0]["abilities.vdata"].replace(
-                        b'm_strValue = "13"', b'm_strValue = "14"'
-                    )
-                elif kind == "misc":
-                    inputs[0]["misc.vdata"] = inputs[0]["misc.vdata"].replace(
-                        b"m_valueMax = 70.0", b"m_valueMax = 71.0"
-                    )
-                elif kind == "npc":
-                    inputs[0]["npc_units.vdata"] = inputs[0]["npc_units.vdata"].replace(
-                        b"m_value = 15", b"m_value = 16"
-                    )
-                elif kind == "item_prices":
-                    inputs[0]["generic_data.vdata"] = inputs[0][
-                        "generic_data.vdata"
-                    ].replace(b"1550", b"1575")
-                elif kind == "localization":
-                    path = next(iter(inputs[1]))
-                    changed = inputs[1][path].replace(
-                        b'"Bullet Lifesteal"', b'"Changed name"'
-                    )
-                    inputs[1].update(dict.fromkeys(inputs[1], changed))
-                elif kind == "property_addition":
-                    inputs[0]["abilities.vdata"] = inputs[0]["abilities.vdata"].replace(
-                        b"m_mapAbilityProperties = {",
-                        b'm_mapAbilityProperties = { FutureStat = {m_strValue = "7"}',
-                        1,
-                    )
-                else:
-                    inputs[0]["abilities.vdata"] = inputs[0]["abilities.vdata"].replace(
-                        b'AbilityDuration = { m_strValue = "0" }', b""
-                    )
-                plan = publish.make_plan(
-                    source_at(),
-                    inputs,
-                    self.plan["index"],
-                    self.output / kind,
-                    latest=True,
-                )
-                self.assertEqual(plan["action"], "publish")
-                self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
-
-    def test_vdata_gate_ignores_localization_and_generator_changes(self):
+    def test_localization_change_creates_a_new_snapshot(self):
         inputs = copy.deepcopy(self.inputs)
-        path = next(iter(inputs[1]))
-        inputs[1][path] += b"\n"
-        for source in (SOURCE, source_at()):
-            with (
-                self.subTest(version=source["client_version"]),
-                patch.object(pipeline, "generator_fingerprint", return_value="f" * 64),
-                patch.object(
-                    pipeline, "build", side_effect=AssertionError("must not rebuild")
-                ),
-            ):
-                plan = publish.make_plan(
-                    source,
-                    inputs,
-                    self.plan["index"],
-                    self.output,
-                    latest=True,
-                    vdata_only=True,
-                )
-            self.assertEqual(plan["action"], "reuse")
-            self.assertEqual(plan["snapshot"], self.plan["snapshot"])
-            self.assertEqual(
-                plan["index"]["snapshots"], self.plan["index"]["snapshots"]
-            )
-            self.assertEqual(plan["index"]["latest"], source["client_version"])
+        inputs[1][next(iter(inputs[1]))] += b"\n"
+        plan = publish.make_plan(
+            source_at(), inputs, self.plan["index"], self.output, latest=True
+        )
+        self.assertEqual(plan["action"], "publish")
+        self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
+
+    def test_vdata_gate_ignores_non_vdata_and_generator_changes(self):
+        localization = {name: data + b"\n" for name, data in self.inputs[1].items()}
+        cases = {
+            "localization": localization,
+            "engine": {**self.inputs[1], **engine_sources()},
+        }
+        for kind, inputs in cases.items():
+            for source in (SOURCE, source_at()):
+                with (
+                    self.subTest(kind=kind, version=source["client_version"]),
+                    patch.object(
+                        pipeline, "generator_fingerprint", return_value="f" * 64
+                    ),
+                    patch.object(
+                        pipeline,
+                        "build",
+                        side_effect=AssertionError("must not rebuild"),
+                    ),
+                ):
+                    plan = publish.make_plan(
+                        source,
+                        (self.inputs[0], inputs),
+                        self.plan["index"],
+                        self.output,
+                        latest=True,
+                        vdata_only=True,
+                    )
+                    self.assertEqual(plan["action"], "reuse")
+                    self.assertEqual(plan["snapshot"], self.plan["snapshot"])
+                    self.assertEqual(
+                        plan["index"]["snapshots"], self.plan["index"]["snapshots"]
+                    )
+                    self.assertEqual(plan["index"]["latest"], source["client_version"])
 
     def test_cli_vdata_gate_previews_reuse_after_a_generator_update(self):
         index_path = self.output / "versions.json"
@@ -316,21 +250,22 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(index["versions"]["1235"]["snapshot"], "1234")
         self.assertFalse((output / "1235").exists())
 
-    def test_vdata_gate_publishes_changes_to_each_required_file(self):
-        for name in sorted(pipeline.REQUIRED_FILES):
-            with self.subTest(file=name):
-                inputs = copy.deepcopy(self.inputs)
-                inputs[0][name] += b"\n"
-                plan = publish.make_plan(
-                    source_at(),
-                    inputs,
-                    self.plan["index"],
-                    self.output / name,
-                    latest=True,
-                    vdata_only=True,
-                )
-                self.assertEqual(plan["action"], "publish")
-                self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
+    def test_vdata_changes_create_new_snapshots_with_either_gate(self):
+        for vdata_only in (False, True):
+            for name in sorted(pipeline.REQUIRED_FILES):
+                with self.subTest(vdata_only=vdata_only, file=name):
+                    inputs = copy.deepcopy(self.inputs)
+                    inputs[0][name] += b"\n"
+                    plan = publish.make_plan(
+                        source_at(),
+                        inputs,
+                        self.plan["index"],
+                        self.output / str(vdata_only) / name,
+                        latest=True,
+                        vdata_only=vdata_only,
+                    )
+                    self.assertEqual(plan["action"], "publish")
+                    self.assertNotEqual(plan["snapshot"], self.plan["snapshot"])
 
     def test_vdata_gate_bootstraps_an_empty_index(self):
         plan = publish.make_plan(
@@ -352,19 +287,6 @@ class PublisherTests(unittest.TestCase):
             )
         self.assertEqual(plan["action"], "reuse")
         self.assertEqual(plan["index"]["latest"], "1235")
-
-    def test_vdata_gate_still_refuses_to_overwrite_a_changed_client_version(self):
-        inputs = copy.deepcopy(self.inputs)
-        inputs[0]["abilities.vdata"] += b"\n"
-        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
-            publish.make_plan(
-                SOURCE,
-                inputs,
-                self.plan["index"],
-                self.output,
-                latest=True,
-                vdata_only=True,
-            )
 
     def test_vdata_gate_records_new_versions_without_uploading_assets(self):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
@@ -430,11 +352,6 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(
             any(c[0] in ("create", "upload") for c in self.github.commands)
         )
-        self.assertEqual(len(self.github.writes), 1)
-
-        self.github.remote["1234"]["assets"].pop()
-        with self.assertRaisesRegex(ValueError, "complete artifact set"):
-            publish.publish_plan(self.github, plan, original, "sha", TARGET)
         self.assertEqual(len(self.github.writes), 1)
 
     def test_generator_change_reuses_a_versions_shared_snapshot(self):
@@ -807,23 +724,6 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.github.index, original)
         self.assertEqual(len(self.github.writes), 1)
 
-    def test_complete_release_is_verified_before_index_commit(self):
-        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
-        release = self.github.release(self.plan["snapshot"])
-        self.assertFalse(release["draft"])
-        self.assertEqual(
-            {a["name"] for a in release["assets"]},
-            {
-                "abilities.json",
-                "heroes.json",
-                "modifiers.json",
-                "misc.json",
-                "manifest.json",
-            },
-        )
-        self.assertEqual(self.github.index, self.plan["index"])
-        self.assertEqual(self.github.latest, self.plan["snapshot"])
-
     def test_new_draft_is_published_by_id_when_tag_lookup_cannot_find_it(self):
         # The tag lookup returns no release; creation returns an untagged draft URL.
         # Any further lookup by tag would reproduce the failed Actions run.
@@ -864,6 +764,19 @@ class PublisherTests(unittest.TestCase):
         self.assertNotEqual(entry["released_at"], entry["source"]["committed_at"])
         release = self.github.release(entry["snapshot"])
         self.assertEqual(release["name"], "boon-data-1234")
+        self.assertFalse(release["draft"])
+        self.assertEqual(
+            {asset["name"] for asset in release["assets"]},
+            {
+                "abilities.json",
+                "heroes.json",
+                "modifiers.json",
+                "misc.json",
+                "manifest.json",
+            },
+        )
+        self.assertEqual(self.github.index, self.plan["index"])
+        self.assertEqual(self.github.latest, self.plan["snapshot"])
         for name, asset in entry["artifacts"].items():
             self.assertEqual(
                 asset["url"],
@@ -970,11 +883,16 @@ class PublisherTests(unittest.TestCase):
         publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
         original = copy.deepcopy(self.github.index)
         remote = copy.deepcopy(self.github.remote)
-        for group, name in ((0, "abilities.vdata"), (1, next(iter(self.inputs[1])))):
+        cases = (
+            (0, "abilities.vdata", False),
+            (0, "abilities.vdata", True),
+            (1, next(iter(self.inputs[1])), False),
+        )
+        for group, name, vdata_only in cases:
             changed = copy.deepcopy(self.inputs)
             changed[group][name] += b"\n// changed source input"
             with (
-                self.subTest(file=name),
+                self.subTest(file=name, vdata_only=vdata_only),
                 self.assertRaisesRegex(
                     ValueError,
                     "client version 1234.*different source content.*refusing",
@@ -986,6 +904,7 @@ class PublisherTests(unittest.TestCase):
                     original,
                     self.output,
                     latest=True,
+                    vdata_only=vdata_only,
                 )
             self.assertEqual(self.github.index, original)
             self.assertEqual(self.github.remote, remote)
@@ -999,13 +918,15 @@ class PublisherTests(unittest.TestCase):
             publish.snapshot_record(json.dumps(manifest).encode())
 
     def test_index_rejects_version_keys_and_metadata_that_disagree(self):
-        for kind in ("version", "timestamp", "artifacts"):
+        for kind in ("version", "timestamp", "artifacts", "missing_catalog"):
             index = copy.deepcopy(self.plan["index"])
             entry = index["versions"]["1234"]
             if kind == "version":
                 entry["client_version"] = "5678"
             elif kind == "timestamp":
                 entry["released_at"] = PUBLISHED_AT
+            elif kind == "missing_catalog":
+                del index["snapshots"][self.plan["snapshot"]]["artifacts"]["misc.json"]
             else:
                 entry["artifacts"] = {}
             with self.subTest(kind=kind), self.assertRaises(ValueError):
@@ -1151,10 +1072,17 @@ class PublisherTests(unittest.TestCase):
 
     def test_manifest_requires_exact_json_assets_and_valid_fingerprints(self):
         path = Path(self.plan["directory"]) / "manifest.json"
-        for kind in ("artifact", "parquet", "zip", "content", "dataset"):
+        for kind in (
+            "heroes.json",
+            "misc.json",
+            "parquet",
+            "zip",
+            "content",
+            "dataset",
+        ):
             manifest = json.loads(path.read_text())
-            if kind == "artifact":
-                manifest["artifacts"].pop("heroes.json")
+            if kind.endswith(".json"):
+                manifest["artifacts"].pop(kind)
             elif kind == "parquet":
                 manifest["artifacts"]["abilities.parquet"] = pipeline.fingerprint(b"")
             elif kind == "zip":

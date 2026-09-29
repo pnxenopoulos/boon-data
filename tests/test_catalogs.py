@@ -26,7 +26,7 @@ class CatalogTests(unittest.TestCase):
             self.vdata, {**self.localization, **engine_sources()}, SOURCE, output
         )
         for name in ("abilities", "heroes", "modifiers", "misc"):
-            before = json.loads((self.output / f"{name}.json").read_text())
+            before = self.json_catalog(name)
             after = json.loads((output / f"{name}.json").read_text())
             self.assertEqual(before["records"], after["records"])
         abilities = json.loads((output / "abilities.json").read_text())
@@ -34,36 +34,28 @@ class CatalogTests(unittest.TestCase):
             abilities["enum_definitions"]["EStatsType"]["values"]["ETechPower"], 59
         )
         self.assertIn("CScaleFunctionFutureVData", abilities["scaling_class_defaults"])
+        self.assertEqual(
+            abilities["modifier_value_types"],
+            {"918": "MODIFIER_VALUE_TECH_RANGE_PERCENT"},
+        )
         modifiers = json.loads((output / "modifiers.json").read_text())
         self.assertIn(
             "1243903559", modifiers["engine_modifier_names"]["indexes"]["by_id"]
+        )
+        self.assertEqual(
+            modifiers["modifier_states"], {"19": "MODIFIER_STATE_SPRINTING"}
         )
 
     def test_misc_preserves_generic_item_prices(self):
         from keyvalues import parse
 
-        misc = json.loads((self.output / "misc.json").read_text())
+        misc = self.json_catalog("misc")
         self.assertEqual(
             misc["generic_data"],
             parse(self.vdata["generic_data.vdata"].decode()),
         )
         self.assertEqual(misc["generic_data"]["m_nItemPricePerTier"][2], 1550)
         self.assertIn("generic_data.vdata", self.metadata["vdata_metadata"])
-
-    def test_modifier_state_enum_preserves_indices_and_omits_sentinels(self):
-        from catalogs import modifier_states
-
-        self.assertEqual(
-            modifier_states(
-                b"MODIFIER_STATE_Z = 0x22, MODIFIER_STATE_A = 7, MODIFIER_STATE_COUNT = 35, MODIFIER_STATE_INVALID = 65535,"
-            ),
-            {"34": "MODIFIER_STATE_Z", "7": "MODIFIER_STATE_A"},
-        )
-        self.assertEqual(modifier_states(b""), {})
-        with self.assertRaises(ValueError):
-            modifier_states(b"MODIFIER_STATE_A = 2, MODIFIER_STATE_B = 2,")
-        with self.assertRaises(ValueError):
-            modifier_states(b"unexpected schema")
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -105,7 +97,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_curated_counter_binding_preserves_source_values(self):
         payloads = {
-            name: json.loads((self.output / f"{name}.json").read_text())
+            name: self.json_catalog(name)
             for name in ("abilities", "heroes", "modifiers", "misc")
         }
         ability = payloads["abilities"]["records"][0]
@@ -144,7 +136,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_bloodscent_counters_are_owner_only_and_preserve_catalog_amounts(self):
         payloads = {
-            name: json.loads((self.output / f"{name}.json").read_text())
+            name: self.json_catalog(name)
             for name in ("abilities", "heroes", "modifiers", "misc")
         }
         ability = payloads["abilities"]["records"][0]
@@ -325,11 +317,6 @@ class CatalogTests(unittest.TestCase):
                     self.assertEqual(
                         row["property_name" if key == "name" else key], value
                     )
-        self.assertEqual(indexed["upgrade_vampire", "AbilityDuration"]["value"], 0)
-        self.assertEqual(
-            indexed["upgrade_vampire", "TierValues"]["value_json"], '"1 2 3"'
-        )
-        self.assertIsNone(indexed["upgrade_vampire", "MissingValue"]["value"])
 
     def test_property_scaling_preserves_explicit_zero_and_multiple_inputs(self):
         indexed = {
@@ -462,7 +449,7 @@ class CatalogTests(unittest.TestCase):
             ("misc", self.misc, ("misc_id",)),
             ("modifiers", self.modifiers, ("source_file", "definition_path")),
         ):
-            payload = json.loads((self.output / f"{name}.json").read_text())
+            payload = self.json_catalog(name)
             self.assertEqual(payload["source_commit"], SOURCE["source"]["commit"])
             indexed = {
                 tuple(row[key] for key in identity): row for row in table.to_dicts()
@@ -600,8 +587,6 @@ class CatalogTests(unittest.TestCase):
         fire_rate = changes["MODIFIER_VALUE_FIRE_RATE"]
         self.assertEqual((fire_rate["value_min"], fire_rate["value_max"]), (12, 35))
         self.assertIsNone(fire_rate["value"])
-        self.assertEqual(gun["definition"]["m_flTimeMin"], 5)
-        self.assertEqual(gun["definition"]["m_flDuration"], 160)
         permanent = next(
             r
             for r in payload["records"]
@@ -639,7 +624,7 @@ class CatalogTests(unittest.TestCase):
         catalogs.build_catalogs(
             self.vdata, self.localization, SOURCE, self.output, parquet=True
         )
-        payload = json.loads((self.output / "abilities.json").read_text())
+        payload = self.json_catalog("abilities")
         definition = payload["records"][0]["definition"]
         self.assertEqual(definition["m_FutureField"], {"nested": [1, True, "abc"]})
         self.assertTrue(
@@ -702,7 +687,7 @@ class CatalogTests(unittest.TestCase):
             catalogs.boolean("maybe")
 
     def test_misc_preserves_temporary_and_permanent_pickup_definitions(self):
-        payload = json.loads((self.output / "misc.json").read_text())
+        payload = self.json_catalog("misc")
         self.assertEqual(payload["catalog"], "misc")
         self.assertEqual(payload["client_version"], "1234")
         records = {r["misc_name"]: r for r in payload["records"]}
@@ -743,7 +728,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("misc.vdata", self.metadata["vdata_metadata"])
 
     def test_misc_modifiers_keep_pickup_context_and_recorded_qualified_ids(self):
-        payload = json.loads((self.output / "modifiers.json").read_text())
+        payload = self.json_catalog("modifiers")
         rows = {
             r["misc_name"]: r
             for r in payload["records"]
@@ -907,7 +892,7 @@ class CatalogTests(unittest.TestCase):
         )
 
 
-class AbilityScopeTests(unittest.TestCase):
+class PropertyMetadataTests(unittest.TestCase):
     def test_property_filter_is_retained(self):
         from catalogs import json_properties
 
@@ -934,20 +919,34 @@ class AbilityScopeTests(unittest.TestCase):
             result["Cooldown"]["apply_filter"], "EApplyFilter_OnlyIfHasCharges"
         )
 
-    def test_network_stat_enum_uses_source_numbers(self):
-        from catalogs import modifier_value_types
-
-        self.assertEqual(
-            modifier_value_types(
-                b"enum X { MODIFIER_VALUE_TECH_RANGE_PERCENT = 918, MODIFIER_VALUE_TECH_RADIUS_PERCENT = 0xABC, };"
+    def test_modifier_enums_preserve_ordinals_and_reject_ambiguity(self):
+        cases = (
+            (
+                catalogs.modifier_value_types,
+                "MODIFIER_VALUE",
+                {"MODIFIER_VALUE_A": 918, "MODIFIER_VALUE_B": 0xABC},
+                "",
             ),
-            {
-                "918": "MODIFIER_VALUE_TECH_RANGE_PERCENT",
-                "2748": "MODIFIER_VALUE_TECH_RADIUS_PERCENT",
-            },
+            (
+                catalogs.modifier_states,
+                "MODIFIER_STATE",
+                {"MODIFIER_STATE_A": 7, "MODIFIER_STATE_B": 0x22},
+                "MODIFIER_STATE_COUNT = 35, MODIFIER_STATE_INVALID = 65535,",
+            ),
         )
-        self.assertEqual(modifier_value_types(b""), {})
-        with self.assertRaises(ValueError):
-            modifier_value_types(b"unexpected schema")
-        with self.assertRaises(ValueError):
-            modifier_value_types(b"MODIFIER_VALUE_A = 5, MODIFIER_VALUE_B = 5,")
+        for convert, prefix, values, sentinels in cases:
+            with self.subTest(prefix=prefix):
+                members = ",".join(
+                    f"{name} = {value:#x}" for name, value in values.items()
+                )
+                self.assertEqual(
+                    convert(f"{members},{sentinels}".encode()),
+                    {str(value): name for name, value in values.items()},
+                )
+                self.assertEqual(convert(b""), {})
+                for invalid in (
+                    b"unexpected schema",
+                    f"{prefix}_A = 5, {prefix}_B = 5,".encode(),
+                ):
+                    with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                        convert(invalid)

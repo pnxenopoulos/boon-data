@@ -39,22 +39,6 @@ SOURCE: dict = {
 
 
 class PipelineTests(unittest.TestCase):
-    def test_state_enum_is_versioned_and_changes_content_hash(self):
-        source = pipeline.resolve_source("main")
-        first = pipeline.build(source, self.output)
-        manifest = json.loads((first / "manifest.json").read_text())
-        catalog = json.loads((first / "modifiers.json").read_text())
-        self.assertEqual(catalog["modifier_states"], {"19": "MODIFIER_STATE_SPRINTING"})
-        self.localization[MODIFIER_STATE_ENUM_FILE] = (
-            b"enum EModifierState { MODIFIER_STATE_SPRINTING = 21, };"
-        )
-        second = pipeline.build(source, self.output / "changed")
-        changed = json.loads((second / "manifest.json").read_text())
-        self.assertNotEqual(
-            manifest["snapshot"]["content_sha256"],
-            changed["snapshot"]["content_sha256"],
-        )
-
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -67,12 +51,6 @@ class PipelineTests(unittest.TestCase):
             for name in pipeline.LOCALIZATION_FILES
         }
         self.localization.update(engine_sources())
-        self.localization[MODIFIER_ENUM_FILE] = (
-            b"enum EModifierValue { MODIFIER_VALUE_TECH_RANGE_PERCENT = 918, };"
-        )
-        self.localization[MODIFIER_STATE_ENUM_FILE] = (
-            b"enum EModifierState { MODIFIER_STATE_SPRINTING = 19, MODIFIER_STATE_COUNT = 20, };"
-        )
         self.contents["new_data.vdata"] = b"{ value = 0.25 }\n"
         self.entries = [
             {
@@ -137,18 +115,12 @@ class PipelineTests(unittest.TestCase):
             ).encode()
         return self.contents[url.rsplit("/", 1)[-1]]
 
-    def test_new_engine_sources_are_pinned_and_change_content_fingerprints(self):
+    def test_engine_source_changes_affect_content_fingerprints(self):
         directory = pipeline.build(SOURCE, self.output)
         original = json.loads((directory / "manifest.json").read_text())
-        self.assertIn(SCALING_FILE, original["schema_files"])
-        self.assertEqual(
-            original["engine_string_files"],
-            {
-                path: pipeline.fingerprint(self.localization[path])
-                for path in STRING_FILES
-            },
-        )
         mutations = {
+            MODIFIER_ENUM_FILE: (b"918", b"920"),
+            MODIFIER_STATE_ENUM_FILE: (b"19", b"21"),
             SCALING_FILE: (b"0.75", b"0.5"),
             STRING_FILES[0]: (b"modifier_fixture", b"modifier_new"),
             "DumpSource2/schemas/client/EStatsType.h": (b"59", b"60"),
@@ -166,8 +138,15 @@ class PipelineTests(unittest.TestCase):
                     manifest["snapshot"]["content_sha256"],
                 )
 
-    def test_new_sources_have_integrity_checks(self):
-        for path in (SCALING_FILE, *STRING_FILES):
+    def test_downloads_verify_git_blobs_for_each_source_type(self):
+        paths = (
+            f"{pipeline.SOURCE_PATH}/abilities.vdata",
+            pipeline.LOCALIZATION_FILES[0],
+            MODIFIER_ENUM_FILE,
+            SCALING_FILE,
+            *STRING_FILES,
+        )
+        for path in paths:
 
             def corrupt(url, path=path):
                 return (
@@ -239,6 +218,21 @@ class PipelineTests(unittest.TestCase):
                 if name in pipeline.LOCALIZATION_FILES
             },
         )
+        self.assertEqual(
+            manifest["schema_files"],
+            {
+                name: pipeline.fingerprint(data)
+                for name, data in self.localization.items()
+                if is_schema(name)
+            },
+        )
+        self.assertEqual(
+            manifest["engine_string_files"],
+            {
+                name: pipeline.fingerprint(self.localization[name])
+                for name in STRING_FILES
+            },
+        )
         self.assertTrue(all(SHA in url for url in self.urls))
         self.assertFalse(any("new_data.vdata" in url for url in self.urls))
 
@@ -268,39 +262,11 @@ class PipelineTests(unittest.TestCase):
             original, {p.name: p.read_bytes() for p in directory.iterdir()}
         )
 
-    def test_enum_schema_is_pinned_and_changes_catalog_fingerprint(self):
-        directory = pipeline.build(SOURCE, self.output)
-        manifest = json.loads((directory / "manifest.json").read_text())
-        self.assertEqual(
-            manifest["schema_files"],
-            {
-                name: pipeline.fingerprint(self.localization[name])
-                for name in self.localization
-                if is_schema(name)
-            },
-        )
-        catalog = json.loads((directory / "abilities.json").read_text())
-        self.assertEqual(
-            catalog["modifier_value_types"],
-            {"918": "MODIFIER_VALUE_TECH_RANGE_PERCENT"},
-        )
-        self.localization[MODIFIER_ENUM_FILE] = (
-            b"enum EModifierValue { MODIFIER_VALUE_TECH_RANGE_PERCENT = 920, };"
-        )
-        with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
-            pipeline.build(SOURCE, self.output)
-
     def test_missing_required_file_does_not_publish_partial_bundle(self):
         self.entries = [
             entry for entry in self.entries if entry["name"] != "misc.vdata"
         ]
         with self.assertRaisesRegex(ValueError, "missing required"):
-            pipeline.build(SOURCE, self.output)
-        self.assertFalse(self.output.exists())
-
-    def test_download_must_match_git_blob(self):
-        self.contents["abilities.vdata"] = b"wrong content"
-        with self.assertRaisesRegex(ValueError, "source integrity"):
             pipeline.build(SOURCE, self.output)
         self.assertFalse(self.output.exists())
 
@@ -313,21 +279,6 @@ class PipelineTests(unittest.TestCase):
         ):
             pipeline.build(SOURCE, self.output)
         self.assertEqual(list(self.output.iterdir()), [])
-
-    def test_localization_integrity_is_checked(self):
-        original_fetch = self.fetch
-
-        def corrupt(url):
-            if url.startswith(pipeline.RAW_URL) and url.endswith("_english.txt"):
-                return b"corrupt localization"
-            return original_fetch(url)
-
-        with (
-            patch.object(pipeline, "fetch", side_effect=corrupt),
-            self.assertRaisesRegex(ValueError, "source integrity"),
-        ):
-            pipeline.build(SOURCE, self.output)
-        self.assertFalse(self.output.exists())
 
     def test_required_catalog_must_be_a_file(self):
         self.entries[0]["type"] = "dir"
