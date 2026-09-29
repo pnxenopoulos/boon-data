@@ -17,6 +17,7 @@ VDATA_FILES = (
     "modifiers.vdata",
     "misc.vdata",
     "npc_units.vdata",
+    "generic_data.vdata",
 )
 MODIFIER_ENUM_FILE = "DumpSource2/schemas/client/EModifierValue.h"
 MODIFIER_STATE_ENUM_FILE = "DumpSource2/schemas/client/EModifierState.h"
@@ -525,7 +526,11 @@ def build_catalogs(
 ) -> dict:
     """Write JSON definitions, optionally adding local Parquet exports."""
     documents = {name: parse(vdata[name].decode("utf-8-sig")) for name in VDATA_FILES}
-    roots = {name: definitions(document) for name, document in documents.items()}
+    roots = {
+        name: definitions(document)
+        for name, document in documents.items()
+        if name != "generic_data.vdata"
+    }
     tokens = localization_tokens(
         {k: v for k, v in localization.items() if k not in SCHEMA_FILES}
     )
@@ -809,6 +814,7 @@ def build_catalogs(
     payloads["abilities"]["modifier_value_types"] = modifier_value_types(
         localization.get(MODIFIER_ENUM_FILE, b"")
     )
+    payloads["misc"]["generic_data"] = documents["generic_data.vdata"]
     payloads["modifiers"]["modifier_states"] = modifier_states(
         localization.get(MODIFIER_STATE_ENUM_FILE, b"")
     )

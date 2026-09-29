@@ -1,0 +1,4 @@
+{
+    generic_data_type = "CitadelGenericData_t"
+    m_nItemPricePerTier = [ 0, 725, 1550, 3100, 6250 ]
+}

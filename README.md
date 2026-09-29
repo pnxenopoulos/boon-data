@@ -36,7 +36,7 @@ The pipeline:
 1. Resolves the requested upstream ref to its full commit SHA.
 2. Reads `game/citadel/steam.inf` at that commit.
 3. Locates `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, `misc.vdata`,
-   and `npc_units.vdata` in
+   `npc_units.vdata`, and `generic_data.vdata` in
    `game/citadel/pak01_dir/scripts/` at the same commit.
 4. Downloads those five files and verifies their sizes and Git blob hashes
    against the directory listing. Missing files are an error.
@@ -237,6 +237,10 @@ candidates = [modifiers["records"][position] for position in positions]
 ```
 
 ### misc.json
+
+The `generic_data` field preserves `generic_data.vdata`, including item prices
+by tier (`m_nItemPricePerTier`). These prices support the hero purchase-bonus
+tables. Rebuild a release to add this field to an existing catalog.
 
 One record per top-level definition in `misc.vdata` and `npc_units.vdata`, keyed
 by `misc_name`. `source_file` and `record_key` retain the original input file.
@@ -509,7 +513,8 @@ GitHub publishes the verified release. Published assets are never replaced.
 `.github/workflows/build-assets.yml` checks hourly, at minute 0 (UTC), and
 supports manual runs with an upstream `ref`. Both use
 `scripts/publish.py --vdata-only --publish` to gate new releases on changes to
-`abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, or `misc.vdata`:
+`abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, `misc.vdata`,
+`npc_units.vdata`, or `generic_data.vdata`:
 
 1. Read the version index and GitHub's release list. Recover any complete release
    published before an interrupted index update. Only published releases can be

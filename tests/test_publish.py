@@ -173,6 +173,7 @@ class PublisherTests(unittest.TestCase):
             "vdata",
             "misc",
             "npc",
+            "item_prices",
             "localization",
             "property_addition",
             "property_removal",
@@ -191,6 +192,10 @@ class PublisherTests(unittest.TestCase):
                     inputs[0]["npc_units.vdata"] = inputs[0]["npc_units.vdata"].replace(
                         b"m_value = 15", b"m_value = 16"
                     )
+                elif kind == "item_prices":
+                    inputs[0]["generic_data.vdata"] = inputs[0][
+                        "generic_data.vdata"
+                    ].replace(b"1550", b"1575")
                 elif kind == "localization":
                     path = next(iter(inputs[1]))
                     changed = inputs[1][path].replace(

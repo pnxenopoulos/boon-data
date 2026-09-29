@@ -18,6 +18,17 @@ SOURCE: dict = {"source": {"commit": "a" * 40}, "client_version": "1234"}
 
 
 class CatalogTests(unittest.TestCase):
+    def test_misc_preserves_generic_item_prices(self):
+        from keyvalues import parse
+
+        misc = json.loads((self.output / "misc.json").read_text())
+        self.assertEqual(
+            misc["generic_data"],
+            parse(self.vdata["generic_data.vdata"].decode()),
+        )
+        self.assertEqual(misc["generic_data"]["m_nItemPricePerTier"][2], 1550)
+        self.assertIn("generic_data.vdata", self.metadata["vdata_metadata"])
+
     def test_modifier_state_enum_preserves_indices_and_omits_sentinels(self):
         from catalogs import modifier_states
 
