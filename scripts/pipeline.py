@@ -15,7 +15,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
-from catalogs import LOCALIZATION_FILES, SCHEMA_FILES, VDATA_FILES, build_catalogs
+from catalogs import LOCALIZATION_FILES, VDATA_FILES, build_catalogs
+from engine_metadata import (
+    SCHEMA_FILES,
+    STRING_FILES,
+    is_engine_source,
+    is_scaling_schema,
+    is_schema,
+)
 from keyvalues import to_json
 
 SOURCE_REPO = "SteamTracking/GameTracking-Deadlock"
@@ -79,6 +86,7 @@ def generator_fingerprint() -> str:
     files = (
         "scripts/pipeline.py",
         "scripts/catalogs.py",
+        "scripts/engine_metadata.py",
         "scripts/keyvalues.py",
         "pyproject.toml",
         "uv.lock",
@@ -100,7 +108,12 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
     }
     schema_files = {
         name: fingerprint(localization[name])
-        for name in SCHEMA_FILES
+        for name in sorted(localization)
+        if is_schema(name)
+    }
+    engine_string_files = {
+        name: fingerprint(localization[name])
+        for name in STRING_FILES
         if name in localization
     }
     content_hash = fingerprint(
@@ -109,6 +122,11 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
                 "files": files,
                 "localization_files": localization_files,
                 **({"schema_files": schema_files} if schema_files else {}),
+                **(
+                    {"engine_string_files": engine_string_files}
+                    if engine_string_files
+                    else {}
+                ),
             }
         ).encode()
     )["sha256"]
@@ -123,6 +141,7 @@ def snapshot_metadata(source: dict, contents: dict, localization: dict) -> dict:
         "files": files,
         "localization_files": localization_files,
         "schema_files": schema_files,
+        "engine_string_files": engine_string_files,
         "snapshot": {**identity, "dataset_sha256": dataset_hash},
     }
 
@@ -146,10 +165,22 @@ def download_inputs(source: dict) -> tuple[dict[str, bytes], dict[str, bytes]]:
         ):
             raise ValueError(f"unexpected VData entry: {entry['name']}")
 
+    # The recursive tree avoids the 1,000-entry limit of the schema directory API.
+    tree = json.loads(fetch(f"{API_URL}/git/trees/{sha}?recursive=1"))
+    if tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
+        raise ValueError("could not obtain a complete schema tree")
+    scaling_entries = {
+        entry["path"]: entry
+        for entry in tree["tree"]
+        if is_scaling_schema(entry["path"])
+    }
+    if not scaling_entries:
+        raise ValueError("source tree is missing scaling class schemas")
+
     def download(path: str, entry: dict | None = None) -> bytes:
         if entry is None:
             entry = json.loads(fetch(f"{API_URL}/contents/{path}?ref={sha}"))
-        if entry["type"] != "file":
+        if entry["type"] not in ("file", "blob"):
             raise ValueError(f"expected a source file: {path}")
         data = fetch(f"{RAW_URL}/{sha}/{path}")
         # Compare with the Git blob listed at this commit, not a moving branch.
@@ -163,7 +194,7 @@ def download_inputs(source: dict) -> tuple[dict[str, bytes], dict[str, bytes]]:
         return name, download(f"{SOURCE_PATH}/{name}", entry)
 
     def download_localization(path: str) -> tuple[str, bytes]:
-        return path, download(path)
+        return path, download(path, scaling_entries.get(path))
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         contents = dict(
@@ -171,7 +202,15 @@ def download_inputs(source: dict) -> tuple[dict[str, bytes], dict[str, bytes]]:
         )
         localization = dict(
             pool.map(
-                download_localization, sorted((*LOCALIZATION_FILES, *SCHEMA_FILES))
+                download_localization,
+                sorted(
+                    (
+                        *LOCALIZATION_FILES,
+                        *SCHEMA_FILES,
+                        *STRING_FILES,
+                        *scaling_entries,
+                    )
+                ),
             )
         )
     return contents, localization
@@ -185,8 +224,8 @@ def build(
     contents = {name: contents[name] for name in sorted(REQUIRED_FILES)}
     localization = {
         name: localization[name]
-        for name in sorted((*LOCALIZATION_FILES, *SCHEMA_FILES))
-        if name in localization
+        for name in sorted(localization)
+        if name in LOCALIZATION_FILES or is_engine_source(name)
     }
     source = snapshot_metadata(source, contents, localization)
     output.mkdir(parents=True, exist_ok=True)

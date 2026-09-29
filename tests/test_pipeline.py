@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import pipeline
-from catalogs import MODIFIER_ENUM_FILE, MODIFIER_STATE_ENUM_FILE
+from engine_metadata import (
+    MODIFIER_ENUM_FILE,
+    MODIFIER_STATE_ENUM_FILE,
+    STRING_FILES,
+    is_schema,
+)
+from test_engine_metadata import SCALING_FILE, engine_sources
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -60,6 +66,7 @@ class PipelineTests(unittest.TestCase):
             name: (FIXTURES / "english.txt").read_bytes()
             for name in pipeline.LOCALIZATION_FILES
         }
+        self.localization.update(engine_sources())
         self.localization[MODIFIER_ENUM_FILE] = (
             b"enum EModifierValue { MODIFIER_VALUE_TECH_RANGE_PERCENT = 918, };"
         )
@@ -85,6 +92,23 @@ class PipelineTests(unittest.TestCase):
 
     def fetch(self, url):
         self.urls.append(url)
+        if "/git/trees/" in url:
+            return json.dumps(
+                {
+                    "truncated": False,
+                    "tree": [
+                        {
+                            "path": path,
+                            "type": "blob",
+                            "size": len(data),
+                            "sha": hashlib.sha1(
+                                b"blob " + str(len(data)).encode() + b"\0" + data
+                            ).hexdigest(),
+                        }
+                        for path, data in self.localization.items()
+                    ],
+                }
+            ).encode()
         if "/commits/" in url:
             return json.dumps(
                 {
@@ -112,6 +136,68 @@ class PipelineTests(unittest.TestCase):
                 self.entries + [{"name": "notes.txt", "type": "file"}]
             ).encode()
         return self.contents[url.rsplit("/", 1)[-1]]
+
+    def test_new_engine_sources_are_pinned_and_change_content_fingerprints(self):
+        directory = pipeline.build(SOURCE, self.output)
+        original = json.loads((directory / "manifest.json").read_text())
+        self.assertIn(SCALING_FILE, original["schema_files"])
+        self.assertEqual(
+            original["engine_string_files"],
+            {
+                path: pipeline.fingerprint(self.localization[path])
+                for path in STRING_FILES
+            },
+        )
+        mutations = {
+            SCALING_FILE: (b"0.75", b"0.5"),
+            STRING_FILES[0]: (b"modifier_fixture", b"modifier_new"),
+            "DumpSource2/schemas/client/EStatsType.h": (b"59", b"60"),
+        }
+        for index, (path, (before, after)) in enumerate(mutations.items()):
+            with self.subTest(path=path):
+                inputs = self.localization.copy()
+                inputs[path] = inputs[path].replace(before, after)
+                changed = pipeline.build(
+                    SOURCE, self.output / str(index), inputs=(self.contents, inputs)
+                )
+                manifest = json.loads((changed / "manifest.json").read_text())
+                self.assertNotEqual(
+                    original["snapshot"]["content_sha256"],
+                    manifest["snapshot"]["content_sha256"],
+                )
+
+    def test_new_sources_have_integrity_checks(self):
+        for path in (SCALING_FILE, *STRING_FILES):
+
+            def corrupt(url, path=path):
+                return (
+                    b"corrupt data"
+                    if url == f"{pipeline.RAW_URL}/{SHA}/{path}"
+                    else self.fetch(url)
+                )
+
+            with (
+                self.subTest(path=path),
+                patch.object(pipeline, "fetch", side_effect=corrupt),
+                self.assertRaisesRegex(ValueError, "source integrity"),
+            ):
+                pipeline.build(SOURCE, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_incomplete_schema_tree_cannot_publish_a_partial_catalog(self):
+        def truncated(url):
+            return (
+                b'{"truncated": true, "tree": []}'
+                if "/git/trees/" in url
+                else self.fetch(url)
+            )
+
+        with (
+            patch.object(pipeline, "fetch", side_effect=truncated),
+            self.assertRaisesRegex(ValueError, "complete schema tree"),
+        ):
+            pipeline.build(SOURCE, self.output)
+        self.assertFalse(self.output.exists())
 
     def test_resolves_ref_once_and_reads_version_at_commit(self):
         self.assertEqual(pipeline.resolve_source("feature/historical"), SOURCE)
@@ -189,7 +275,8 @@ class PipelineTests(unittest.TestCase):
             manifest["schema_files"],
             {
                 name: pipeline.fingerprint(self.localization[name])
-                for name in pipeline.SCHEMA_FILES
+                for name in self.localization
+                if is_schema(name)
             },
         )
         catalog = json.loads((directory / "abilities.json").read_text())

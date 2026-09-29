@@ -9,6 +9,14 @@ from collections import defaultdict
 from pathlib import Path
 
 import polars as pl
+from engine_metadata import (
+    MODIFIER_ENUM_FILE,
+    MODIFIER_STATE_ENUM_FILE,
+    engine_modifier_names,
+    enum_definitions,
+    is_engine_source,
+    scaling_class_defaults,
+)
 from keyvalues import parse, to_json, unwrap
 
 VDATA_FILES = (
@@ -19,9 +27,6 @@ VDATA_FILES = (
     "npc_units.vdata",
     "generic_data.vdata",
 )
-MODIFIER_ENUM_FILE = "DumpSource2/schemas/client/EModifierValue.h"
-MODIFIER_STATE_ENUM_FILE = "DumpSource2/schemas/client/EModifierState.h"
-SCHEMA_FILES = (MODIFIER_ENUM_FILE, MODIFIER_STATE_ENUM_FILE)
 WORLD_FILES = ("misc.vdata", "npc_units.vdata")
 LOCALIZATION_FILES = tuple(
     f"game/citadel/resource/localization/{name}/{name}_english.txt"
@@ -532,7 +537,7 @@ def build_catalogs(
         if name != "generic_data.vdata"
     }
     tokens = localization_tokens(
-        {k: v for k, v in localization.items() if k not in SCHEMA_FILES}
+        {k: v for k, v in localization.items() if not is_engine_source(k)}
     )
     provenance = {
         "source_commit": source["source"]["commit"],
@@ -749,7 +754,7 @@ def build_catalogs(
         )
     metadata = {}
     json_metadata = {}
-    payloads = {}
+    payloads: dict[str, dict] = {}
     for name, table in tables.items():
         check_ids(
             table,
@@ -813,6 +818,13 @@ def build_catalogs(
     # same source revision rather than embedding ordinal tables in consumers.
     payloads["abilities"]["modifier_value_types"] = modifier_value_types(
         localization.get(MODIFIER_ENUM_FILE, b"")
+    )
+    payloads["abilities"]["enum_definitions"] = enum_definitions(localization)
+    payloads["abilities"]["scaling_class_defaults"] = scaling_class_defaults(
+        localization
+    )
+    payloads["modifiers"]["engine_modifier_names"] = engine_modifier_names(
+        localization, payloads["modifiers"]["records"], string_token
     )
     payloads["misc"]["generic_data"] = documents["generic_data.vdata"]
     payloads["modifiers"]["modifier_states"] = modifier_states(

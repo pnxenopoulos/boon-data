@@ -1,0 +1,1 @@
+enum EModifierState : uint16_t { MODIFIER_STATE_SPRINTING = 19, MODIFIER_STATE_COUNT = 20, };

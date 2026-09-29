@@ -12,12 +12,33 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import catalogs
+from test_engine_metadata import engine_sources
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE: dict = {"source": {"commit": "a" * 40}, "client_version": "1234"}
 
 
 class CatalogTests(unittest.TestCase):
+    def test_engine_metadata_does_not_change_vdata_definitions(self):
+        output = self.output / "engine"
+        output.mkdir()
+        catalogs.build_catalogs(
+            self.vdata, {**self.localization, **engine_sources()}, SOURCE, output
+        )
+        for name in ("abilities", "heroes", "modifiers", "misc"):
+            before = json.loads((self.output / f"{name}.json").read_text())
+            after = json.loads((output / f"{name}.json").read_text())
+            self.assertEqual(before["records"], after["records"])
+        abilities = json.loads((output / "abilities.json").read_text())
+        self.assertEqual(
+            abilities["enum_definitions"]["EStatsType"]["values"]["ETechPower"], 59
+        )
+        self.assertIn("CScaleFunctionFutureVData", abilities["scaling_class_defaults"])
+        modifiers = json.loads((output / "modifiers.json").read_text())
+        self.assertIn(
+            "1243903559", modifiers["engine_modifier_names"]["indexes"]["by_id"]
+        )
+
     def test_misc_preserves_generic_item_prices(self):
         from keyvalues import parse
 

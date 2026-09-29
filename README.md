@@ -38,11 +38,12 @@ The pipeline:
 3. Locates `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, `misc.vdata`,
    `npc_units.vdata`, and `generic_data.vdata` in
    `game/citadel/pak01_dir/scripts/` at the same commit.
-4. Downloads those five files and verifies their sizes and Git blob hashes
+4. Downloads those six files and verifies their sizes and Git blob hashes
    against the directory listing. Missing files are an error.
 5. Downloads and verifies the English hero, ability, item, modifier, and general UI
-   localization files at the same commit.
-6. Parses the five catalog VData files, joins names, and writes JSON catalogs.
+   localization files, selected engine schemas, and client/server string dumps
+   at the same commit.
+6. Parses the six VData files, joins names, and writes JSON catalogs.
 7. Writes `manifest.json` with provenance, game identifiers, catalog record counts,
    and SHA-256 hashes for every input and output file.
 
@@ -53,7 +54,7 @@ Full SHA-256 fingerprints and the full upstream commit SHA remain in the
 manifest for provenance and verification; they are not part of the tag.
 
 A client-version tag cannot hold two different snapshots. Rerunning an existing
-version with identical VData and localization inputs verifies and reuses its
+version with identical source inputs verifies and reuses its
 published files, even if the generator has changed. Different source content for
 an already released version fails without replacing its assets.
 
@@ -490,16 +491,18 @@ The JSON definitions retain these source fields without resolving them.
 | `client_version`, `server_version` | Values from `steam.inf` |
 | `source_revision` | Engine source revision from `steam.inf` |
 | `version_date`, `version_time` | Build timestamp strings from `steam.inf` |
-| `files` | Map of the five VData input filenames to `{ "sha256": "…", "bytes": N }` |
+| `files` | Map of the six VData input filenames to `{ "sha256": "…", "bytes": N }` |
 | `localization_files` | Map of upstream localization paths to SHA-256 and byte count |
+| `schema_files` | Map of enum and scaling-class schema paths to SHA-256 and byte count |
+| `engine_string_files` | Map of client/server string-dump paths to SHA-256 and byte count |
 | `artifacts` | Map of the four JSON catalogs to SHA-256 and byte count (the manifest itself is fingerprinted in the index) |
-| `snapshot.content_sha256` | Fingerprint of the five VData and five English localization input names, hashes, and sizes |
+| `snapshot.content_sha256` | Fingerprint of the VData, localization, schema, and engine-string input names, hashes, and sizes |
 | `snapshot.generator_sha256` | Fingerprint of the catalog/parser/packaging code, `pyproject.toml`, `uv.lock`, and installed Polars version |
 | `snapshot.dataset_sha256` | Fingerprint combining content and generator revision |
 | `catalogs.polars_version` | Polars version used by the catalog builder |
 | `catalogs.tables` | Empty in published manifests; row counts and column types when exporting local Parquet |
 | `catalogs.json_catalogs` | Record count for each JSON catalog |
-| `catalogs.vdata_metadata` | JSON-encoded root metadata from the five parsed VData files |
+| `catalogs.vdata_metadata` | JSON-encoded root metadata from the six parsed VData files |
 
 Identifiers are strings; unavailable optional `steam.inf` fields are `null`.
 There is no inferred Steam build ID or demo build mapping. Packaging timestamps
@@ -520,7 +523,7 @@ supports manual runs with an upstream `ref`. Both use
    published before an interrupted index update. Only published releases can be
    reused; stale index entries for missing releases do not count.
 2. Resolve and pin the requested upstream ref; download and verify its inputs.
-3. Compare the five VData file hashes and sizes with the latest indexed snapshot.
+3. Compare the six VData file hashes and sizes with the latest indexed snapshot.
    If unchanged, reuse that snapshot even if localization, generator code,
    or dependencies changed. If there is no `latest` yet, compare with the most
    recently observed backfilled version. If that release is missing or the index
@@ -542,7 +545,7 @@ supports manual runs with an upstream `ref`. Both use
    observation with the requested commit's metadata.
 
 The gate compares file contents, not upstream commit IDs. Localization-only,
-metadata-only, generator, lockfile, and lint-tool updates do not trigger
+schema-only, engine-string-only, metadata-only, generator, lockfile, and lint-tool updates do not trigger
 new releases in **Build boon-data**. Their changes are incorporated when the next
 VData change requires a build. Other upstream VData files do not trigger releases.
 The full content and generator fingerprints remain in the manifest for
@@ -615,11 +618,12 @@ gh workflow run backfill.yml --repo pnxenopoulos/boon-data \
   -f source_commit="<full-upstream-commit-sha>"
 ```
 
-The backfill workflow deliberately omits `--vdata-only`: it compares all VData and
-localization inputs. An existing client version with matching inputs reuses its
+The backfill workflow deliberately omits `--vdata-only`: it compares all VData,
+localization, schema, and engine-string inputs. An existing client version with matching inputs reuses its
 published snapshot across generator updates. For a new version, reuse requires
 matching both content and generator fingerprints. It reads
-`steam.inf`, all five VData files, and English localization from that exact commit. It publishes the same five JSON assets and records the
+`steam.inf`, all six VData files, English localization, selected schemas, and
+engine strings from that exact commit. It publishes the same five JSON assets and records the
 source commit, client version, build date/time, and publication time in the index.
 New releases are named `boon-data-<ClientVersion>` with tag `<ClientVersion>`.
 Identical datasets reuse an existing snapshot; the historical client version is
@@ -835,3 +839,62 @@ tracked VData files.
 Consumers can use this map to decode a pawn's enabled, disabled, and predicted
 state masks. The catalog does not decide which mask takes priority or supply
 the magnitude of an effect. State names and bit indices are version-specific.
+
+### Scaling-class defaults and enum definitions
+
+`abilities.json` contains two additional objects:
+
+| Field | Contents |
+| --- | --- |
+| `scaling_class_defaults` | Schema class name to `defaults`, `base_class`, and `source_file` |
+| `enum_definitions` | Enum name to `values`, `names_by_value`, `underlying_type`, and `source_file` |
+
+The build finds `CScaleFunction*.h` files in `DumpSource2/schemas/client` at
+`source_commit`. It reads each explicit `MGetKV3ClassDefaults` object. Classes
+without declared defaults have no entry. Nested curves and other fields remain
+intact. Explicit VData values remain unchanged; defaults are stored separately.
+These records do not supply equations or infer links between schema class names
+and VData `_class` aliases.
+
+Enum definitions include `EStatsType`, `PropertyValueApplyFilter_t`,
+`StatsUsageFlags_t`, `EModifierValue`, and `EModifierState`. `values` maps each
+symbol to its integer value. `names_by_value` maps each decimal value to a list
+of symbols. Aliases, flags, and count/invalid sentinels remain in these full
+records. The existing `modifier_value_types` and `modifier_states` maps keep
+their current format and filtering.
+
+```python
+import json
+from pathlib import Path
+
+abilities = json.loads(Path("abilities.json").read_text())
+filters = abilities["enum_definitions"]["PropertyValueApplyFilter_t"]["values"]
+imbued_filter = filters["EApplyFilter_OnlyIfImbued"]
+```
+
+### Modifier names from engine strings
+
+`modifiers.json.engine_modifier_names` contains `records`, `indexes.by_name`,
+`indexes.by_id`, and `id_collisions`. The build reads whole lines that match
+`modifier_*` or `citadel_modifier_*` identifiers from the client and server
+string dumps at `source_commit`.
+
+Each record has `modifier_name`, its hashed `modifier_id`, `status: "name_only"`,
+and `sources` with file paths and line numbers. `catalog_keys` links exact names
+to existing VData records, when available. Name-only records have no inferred
+stat effects, activation conditions, or owning ability. A string's presence
+also does not prove that the modifier is used in a match.
+
+`indexes.by_name` maps a name to a record index. `indexes.by_id` maps a decimal
+ID to all matching record indices. `id_collisions` lists IDs with different
+names, including conflicts with VData modifier names. Consumers must not select
+an arbitrary candidate when an ID is ambiguous.
+
+For example, the source used for client version `6698` contains
+`modifier_citadel_pre_match_wait`, whose hashed ID is `1243903559`. Its name
+helps identify the modifier; it does not establish its gameplay effects.
+
+All new source files have Git blob checks and manifest fingerprints. The release
+still contains four catalogs and a manifest. Existing published files do not
+change; a new build is required to include this metadata. Scheduled checks
+continue to use the six VData files as their release gate.

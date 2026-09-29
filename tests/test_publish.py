@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import catalogs
 import pipeline
 import publish
+from test_engine_metadata import engine_sources
 from test_pipeline import SOURCE
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -136,6 +137,40 @@ class PublisherTests(unittest.TestCase):
             SOURCE, self.inputs, self.initial, self.output, latest=True
         )
         self.github = FakeGitHub()
+
+    def test_engine_metadata_manifest_is_accepted_and_tampering_is_rejected(self):
+        inputs = (self.inputs[0], {**self.inputs[1], **engine_sources()})
+        plan = publish.make_plan(
+            source_at(), inputs, self.initial, self.output, latest=False
+        )
+        manifest = json.loads((Path(plan["directory"]) / "manifest.json").read_bytes())
+        tag, _ = publish.snapshot_record(publish.to_json(manifest).encode())
+        self.assertEqual(tag, "1235")
+        for field in ("schema_files", "engine_string_files"):
+            altered = copy.deepcopy(manifest)
+            path = next(iter(altered[field]))
+            altered[field][path]["sha256"] = "0" * 64
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "source content fingerprint"),
+            ):
+                publish.snapshot_record(publish.to_json(altered).encode())
+
+    def test_vdata_gate_still_reuses_snapshots_after_engine_metadata_changes(self):
+        inputs = (self.inputs[0], {**self.inputs[1], **engine_sources()})
+        with patch.object(
+            pipeline, "build", side_effect=AssertionError("must not rebuild")
+        ):
+            plan = publish.make_plan(
+                source_at(),
+                inputs,
+                self.plan["index"],
+                self.output,
+                latest=True,
+                vdata_only=True,
+            )
+        self.assertEqual(plan["action"], "reuse")
+        self.assertEqual(plan["snapshot"], self.plan["snapshot"])
 
     def test_misc_is_required_by_manifests_and_index_records(self):
         manifest = json.loads(

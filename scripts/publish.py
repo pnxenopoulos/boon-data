@@ -90,8 +90,9 @@ def snapshot_record(
     if set(manifest["artifacts"]) != ARTIFACTS:
         raise ValueError("snapshot manifest does not describe a complete release")
     inputs = {key: manifest[key] for key in ("files", "localization_files")}
-    if manifest.get("schema_files"):
-        inputs["schema_files"] = manifest["schema_files"]
+    for key in ("schema_files", "engine_string_files"):
+        if manifest.get(key):
+            inputs[key] = manifest[key]
     if (
         pipeline.fingerprint(to_json(inputs).encode())["sha256"]
         != identity["content_sha256"]
