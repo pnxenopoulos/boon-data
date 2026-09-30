@@ -400,6 +400,8 @@ def add_lookups(payloads: dict[str, dict]) -> None:
             bindings.append(binding)
         modifier["property_bindings"] = bindings
 
+    add_ethereal_fire_rate_binding(payloads, by_key)
+
     for record in payloads["abilities"]["records"]:
         for name, prop in record["properties"].items():
             if prop["stat"]:
@@ -412,6 +414,58 @@ def add_lookups(payloads: dict[str, dict]) -> None:
                 )
 
     add_runtime_bindings(payloads, by_key)
+
+
+def add_ethereal_fire_rate_binding(
+    payloads: dict[str, dict], by_key: dict[str, dict]
+) -> None:
+    """Bind Mercurial Magnum's fire-rate property to its specific effect modifier."""
+    for modifier in payloads["modifiers"]["records"]:
+        if modifier["definition"].get("_class") != "modifier_ethereal_bullets_buff":
+            continue
+        parent_key, field = modifier["record_key"].rsplit("/", 1)
+        parent = by_key.get(parent_key, {})
+        if (
+            field != "m_BuffModifier"
+            or parent.get("definition", {}).get("_class")
+            != "modifier_ethereal_bullets_watcher"
+        ):
+            continue
+        owner_key = (
+            f"{modifier['source_file']}#/{modifier['definition_path'].split('/')[1]}"
+        )
+        owner = by_key[owner_key]
+        prop = owner.get("properties", {}).get("BonusFireRate")
+        if (
+            prop is None
+            or prop["stat"] != "MODIFIER_VALUE_FIRE_RATE"
+            or prop["modifier_keys"]
+        ):
+            continue
+        # Curated link, not an explicit VData registration. At GameTracking revision
+        # 8580b13d18d5d966430d2c41501f34bdb7c6243a the engine buff schema has
+        # m_flEffectivecFireRatePercent; replay 108575009 records a matching float1
+        # during this buff. Do not bind its separate bullet-damage buff or watcher.
+        # Keep values/upgrades in VData and label the activation as inferred.
+        prop["modifier_keys"].append(modifier["record_key"])
+        bound = {k: v for k, v in prop.items() if k != "modifier_keys"}
+        modifier["stat_changes"].append(
+            {
+                "kind": "inferred_property",
+                "property_name": "BonusFireRate",
+                "binding_source": "curated",
+                **bound,
+            }
+        )
+        modifier["property_bindings"].append(
+            {
+                "property_name": "BonusFireRate",
+                "source_record_key": owner_key,
+                "status": "resolved",
+                "binding_source": "curated",
+                "property": bound,
+            }
+        )
 
 
 def add_bloodscent_counter(ability: dict) -> None:
@@ -657,8 +711,14 @@ def build_catalogs(
             )
             if not is_root and (subclass_name := value.get("_my_subclass_name")):
                 scope = f"{scope}/{subclass_name}"
-            if is_root or str(value.get("_class", "")).startswith(
-                ("modifier_", "citadel_modifier_")
+            # This field belongs to CCitadelModifierVData. Some subclasses have
+            # other class-name prefixes, but still declare explicit stat bindings.
+            if (
+                is_root
+                or str(value.get("_class", "")).startswith(
+                    ("modifier_", "citadel_modifier_")
+                )
+                or "m_vecAutoRegisterModifierValueFromAbilityPropertyName" in value
             ):
                 name = owner if is_root else value.get("_my_subclass_name")
                 if name:

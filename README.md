@@ -782,6 +782,14 @@ provenance is included in every bundle.
 
 ### Curated runtime bindings
 
+Mercurial Magnum links `BonusFireRate` to the watcher's
+`modifier_ethereal_bullets_buff`. The separate bullet-damage buff and the watcher
+do not grant this bonus. This link uses replay evidence and the engine schema;
+it is not an explicit VData registration. The stat change has
+`kind: "inferred_property"` and `binding_source: "curated"`. Apply it only while
+that buff is active. The value and upgrades come from the catalog. An explicit
+VData binding takes priority. Raw definitions remain unchanged.
+
 Trophy Collector links `StackingBonusSprintSpeed` to the ability entity's
 `m_iTrophyCount` while `m_GoldModifier` is active. This engine relationship is
 explicitly declared in `scripts/catalogs.py`; it is not a VData registration.

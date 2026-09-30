@@ -46,6 +46,39 @@ class CatalogTests(unittest.TestCase):
             modifiers["modifier_states"], {"19": "MODIFIER_STATE_SPRINTING"}
         )
 
+    def test_explicit_bindings_identify_modifiers_without_class_name_prefix(self):
+        self.vdata["abilities.vdata"] = b"""{
+            generic_data_type = "CCitadelAbilityVData"
+            ability_test = {
+                m_mapAbilityProperties = {
+                    Bonus = { m_strValue = "7" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                }
+                m_Aura = subclass:{
+                    _class = "modifier_base_aura"
+                    _my_subclass_name = "aura"
+                    m_modifierProvidedByAura = subclass:{
+                        _class = "unusual_effect_class"
+                        _my_subclass_name = "friendly"
+                        m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["Bonus"]
+                    }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(self.vdata, self.localization, SOURCE, self.output)
+        modifiers = self.json_catalog("modifiers")
+        identifier = catalogs.string_token("ability_test/aura/friendly")
+        (index,) = modifiers["indexes"]["by_qualified_id"][str(identifier)]
+        record = modifiers["records"][index]
+        self.assertEqual(record["definition"]["_class"], "unusual_effect_class")
+        (effect,) = record["stat_changes"]
+        self.assertEqual(
+            (effect["stat"], effect["value"]), ("MODIFIER_VALUE_TECH_POWER", 7)
+        )
+        ability = self.json_catalog("abilities")["records"][0]
+        self.assertEqual(
+            ability["properties"]["Bonus"]["modifier_keys"], [record["record_key"]]
+        )
+
     def test_misc_preserves_generic_item_prices(self):
         from keyvalues import parse
 
@@ -94,6 +127,85 @@ class CatalogTests(unittest.TestCase):
         )
         for path in output.iterdir():
             self.assertEqual(path.read_bytes(), (self.output / path.name).read_bytes())
+
+    def test_ethereal_fire_rate_binds_only_its_buff_and_keeps_source_values(self):
+        self.vdata["abilities.vdata"] = b"""{
+            generic_data_type = "CCitadelAbilityVData"
+            ability_test = {
+                m_mapAbilityProperties = {
+                    BonusFireRate = { m_strValue = "37" m_eProvidedPropertyType = "MODIFIER_VALUE_FIRE_RATE" }
+                }
+                m_Watcher = subclass:{
+                    _class = "modifier_ethereal_bullets_watcher"
+                    _my_subclass_name = "watcher"
+                    m_BuffModifier = subclass:{ _class = "modifier_ethereal_bullets_buff" _my_subclass_name = "buff" }
+                    m_BulletDamageBuffModifier = subclass:{ _class = "modifier_ethereal_bullets_bullet_buff" _my_subclass_name = "bullet_buff" }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(self.vdata, self.localization, SOURCE, self.output)
+        ability = self.json_catalog("abilities")["records"][0]
+        modifiers = self.json_catalog("modifiers")["records"]
+        buff = next(
+            m
+            for m in modifiers
+            if m["definition"]["_class"] == "modifier_ethereal_bullets_buff"
+        )
+        (effect,) = buff["stat_changes"]
+        self.assertEqual(effect["kind"], "inferred_property")
+        self.assertEqual(effect["binding_source"], "curated")
+        self.assertEqual(effect["value"], 37)
+        self.assertEqual(
+            ability["properties"]["BonusFireRate"]["modifier_keys"],
+            [buff["record_key"]],
+        )
+        self.assertEqual(
+            ability["stat_changes"][0]["modifier_keys"], [buff["record_key"]]
+        )
+        self.assertTrue(
+            all(
+                not m["stat_changes"]
+                for m in modifiers
+                if m is not buff and m["source_file"] == "abilities.vdata"
+            )
+        )
+        self.assertNotIn(
+            "m_vecAutoRegisterModifierValueFromAbilityPropertyName", buff["definition"]
+        )
+        # An explicit registration supersedes the curated link; a different engine
+        # class must not inherit it. Exercise both with the same source fixture.
+        for replacement, expected_kind in (
+            (
+                b'm_vecAutoRegisterModifierValueFromAbilityPropertyName = ["BonusFireRate"]',
+                "bound_property",
+            ),
+            (b"", None),
+        ):
+            source = self.vdata["abilities.vdata"]
+            if replacement:
+                source = source.replace(
+                    b'_class = "modifier_ethereal_bullets_buff"',
+                    b'_class = "modifier_ethereal_bullets_buff" ' + replacement,
+                )
+            else:
+                source = source.replace(
+                    b"modifier_ethereal_bullets_buff", b"modifier_unrelated"
+                )
+            catalogs.build_catalogs(
+                {**self.vdata, "abilities.vdata": source},
+                self.localization,
+                SOURCE,
+                self.output,
+            )
+            effects = [
+                e
+                for m in self.json_catalog("modifiers")["records"]
+                if m["source_file"] == "abilities.vdata"
+                for e in m["stat_changes"]
+            ]
+            self.assertEqual(
+                [e["kind"] for e in effects], [expected_kind] if expected_kind else []
+            )
 
     def test_curated_counter_binding_preserves_source_values(self):
         payloads = {
