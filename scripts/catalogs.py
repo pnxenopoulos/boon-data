@@ -366,6 +366,17 @@ def add_lookups(payloads: dict[str, dict]) -> None:
                 record["properties"] = properties[key]
         payload["indexes"] = indexes
 
+    # A standalone modifier can register properties supplied by an explicit
+    # non-embedded reference. Retain each owner; shared names are not ownership.
+    external_owners: dict[str, set[str]] = {}
+    for modifier in payloads["modifiers"]["records"]:
+        definition = modifier["definition"]
+        name = definition.get("m_NonEmbeddedModifier")
+        if definition.get("m_bUseNonEmbedded") is True and isinstance(name, str):
+            owner_key = f"{modifier['source_file']}#/{modifier['definition_path'].split('/')[1]}"
+            if by_key[owner_key].get("ability_id") is not None:
+                external_owners.setdefault(name, set()).add(owner_key)
+
     for modifier in payloads["modifiers"]["records"]:
         root_path = "/" + modifier["definition_path"].split("/")[1]
         owner_key = f"{modifier['source_file']}#{root_path}"
@@ -376,31 +387,44 @@ def add_lookups(payloads: dict[str, dict]) -> None:
         for name in modifier["definition"].get(
             "m_vecAutoRegisterModifierValueFromAbilityPropertyName", []
         ):
-            prop = properties[owner_key].get(name)
-            binding = {
-                "property_name": name,
-                "source_record_key": owner_key,
-                "status": "resolved" if prop is not None else "unresolved",
-                "property": None,
-            }
-            if prop is not None:
+            owners = [owner_key]
+            if modifier["source_file"] == "modifiers.vdata" and owner is modifier:
+                owners.extend(
+                    sorted(external_owners.get(modifier["modifier_name"], set()))
+                )
+            matches = [key for key in owners if name in properties[key]]
+            if not matches:
+                bindings.append(
+                    {
+                        "property_name": name,
+                        "source_record_key": owner_key,
+                        "status": "unresolved",
+                        "property": None,
+                    }
+                )
+            for key in matches:
+                prop = properties[key][name]
                 if modifier["record_key"] not in prop["modifier_keys"]:
                     prop["modifier_keys"].append(modifier["record_key"])
-                binding["property"] = {
-                    k: v for k, v in prop.items() if k != "modifier_keys"
-                }
+                bound = {k: v for k, v in prop.items() if k != "modifier_keys"}
+                if key != owner_key:
+                    bound["source_ability_id"] = by_key[key]["ability_id"]
+                bindings.append(
+                    {
+                        "property_name": name,
+                        "source_record_key": key,
+                        "status": "resolved",
+                        "property": bound,
+                    }
+                )
                 if prop["stat"]:
                     modifier["stat_changes"].append(
-                        {
-                            "kind": "bound_property",
-                            "property_name": name,
-                            **binding["property"],
-                        }
+                        {"kind": "bound_property", "property_name": name, **bound}
                     )
-            bindings.append(binding)
         modifier["property_bindings"] = bindings
 
     add_ethereal_fire_rate_binding(payloads, by_key)
+    add_spirit_snatch_bindings(payloads, by_key)
 
     for record in payloads["abilities"]["records"]:
         for name, prop in record["properties"].items():
@@ -466,6 +490,76 @@ def add_ethereal_fire_rate_binding(
                 "property": bound,
             }
         )
+
+
+def add_spirit_snatch_bindings(
+    payloads: dict[str, dict], by_key: dict[str, dict]
+) -> None:
+    """Link the separate steal effects; keep all amounts and upgrades in VData."""
+    roles = {
+        "m_BuffModifier": (
+            "modifier_upgrade_spirit_snatch_buff",
+            ("TechPowerGain", "TechArmorGain"),
+        ),
+        "m_DebuffModifier": (
+            "modifier_upgrade_spirit_snatch_debuff",
+            ("TechPowerReduction", "TechArmorDamageReduction"),
+        ),
+    }
+    for modifier in payloads["modifiers"]["records"]:
+        parent_key, field = modifier["record_key"].rsplit("/", 1)
+        role = roles.get(field)
+        if role is None or modifier["definition"].get("_class") != role[0]:
+            continue
+        parent = by_key.get(parent_key, {})
+        if parent.get("definition", {}).get("_class") != "modifier_spirit_snatch":
+            continue
+        owner_key = (
+            f"{modifier['source_file']}#/{modifier['definition_path'].split('/')[1]}"
+        )
+        owner = by_key[owner_key]
+        properties = owner.get("properties", {})
+        if "LightMeleeReduction" not in properties or any(
+            properties.get(name, {}).get("stat") != "MODIFIER_VALUE_TECH_POWER"
+            for name in ("TechPowerGain", "TechPowerReduction")
+        ):
+            # These count units are verified for the flat-steal/light-reduction
+            # definition. Do not apply them to an older percentage-steal shape.
+            continue
+        for name in role[1]:
+            prop = properties.get(name)
+            if prop is None or prop["stat"] is None or prop["modifier_keys"]:
+                continue
+            # Curated activation and count units, not a VData registration. In
+            # replay 108575009, light hits record 70 and heavy hits record 100;
+            # the catalog's LightMeleeReduction is 30%. Counts accumulate and
+            # decay. Resolve each recorded buff/debuff independently, including
+            # removals on target death. Source: GameTracking revision
+            # 8580b13d18d5d966430d2c41501f34bdb7c6243a.
+            prop["modifier_keys"].append(modifier["record_key"])
+            prop["runtime_count"] = {
+                "source": "modifier",
+                "field": "stack_count",
+                "divisor": 100,
+            }
+            bound = {k: v for k, v in prop.items() if k != "modifier_keys"}
+            modifier["stat_changes"].append(
+                {
+                    "kind": "inferred_property",
+                    "property_name": name,
+                    "binding_source": "curated",
+                    **bound,
+                }
+            )
+            modifier["property_bindings"].append(
+                {
+                    "property_name": name,
+                    "source_record_key": owner_key,
+                    "status": "resolved",
+                    "binding_source": "curated",
+                    "property": bound,
+                }
+            )
 
 
 def add_bloodscent_counter(ability: dict) -> None:

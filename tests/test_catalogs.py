@@ -79,6 +79,76 @@ class CatalogTests(unittest.TestCase):
             ability["properties"]["Bonus"]["modifier_keys"], [record["record_key"]]
         )
 
+    def test_non_embedded_registrations_keep_each_source_ability(self):
+        self.vdata["modifiers.vdata"] = b"""{
+            generic_data_type = "CCitadelModifierVData"
+            shared_effect = {
+                _class = "modifier_base"
+                m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["Bonus"]
+            }
+        }"""
+        self.vdata["abilities.vdata"] = b"""{
+            generic_data_type = "CCitadelAbilityVData"
+            first = {
+                m_mapAbilityProperties = {
+                    Bonus = { m_strValue = "7" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                }
+                m_AutoIntrinsicModifiers = [subclass:{
+                    _class = "modifier_apply_debuff_proc"
+                    _my_subclass_name = "proc"
+                    m_bUseNonEmbedded = true
+                    m_NonEmbeddedModifier = "shared_effect"
+                }]
+            }
+            second = {
+                m_mapAbilityProperties = {
+                    Bonus = { m_strValue = "19" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                }
+                m_AutoIntrinsicModifiers = [subclass:{
+                    _class = "modifier_apply_debuff_proc"
+                    _my_subclass_name = "proc"
+                    m_bUseNonEmbedded = true
+                    m_NonEmbeddedModifier = "shared_effect"
+                }]
+            }
+            inactive_reference = {
+                m_mapAbilityProperties = {
+                    Bonus = { m_strValue = "100" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                }
+                m_AutoIntrinsicModifiers = [subclass:{
+                    _class = "modifier_apply_debuff_proc"
+                    _my_subclass_name = "proc"
+                    m_bUseNonEmbedded = false
+                    m_NonEmbeddedModifier = "shared_effect"
+                }]
+            }
+        }"""
+        catalogs.build_catalogs(self.vdata, self.localization, SOURCE, self.output)
+        modifier = next(
+            r
+            for r in self.json_catalog("modifiers")["records"]
+            if r["record_key"] == "modifiers.vdata#/shared_effect"
+        )
+        effects = modifier["stat_changes"]
+        self.assertEqual(
+            {(e["source_ability_id"], e["value"]) for e in effects},
+            {
+                (catalogs.string_token("first"), 7),
+                (catalogs.string_token("second"), 19),
+            },
+        )
+        self.assertTrue(
+            all(b["status"] == "resolved" for b in modifier["property_bindings"])
+        )
+        self.assertNotIn("m_mapAbilityProperties", modifier["definition"])
+        for ability in self.json_catalog("abilities")["records"]:
+            self.assertEqual(
+                ability["properties"]["Bonus"]["modifier_keys"],
+                []
+                if ability["ability_name"] == "inactive_reference"
+                else [modifier["record_key"]],
+            )
+
     def test_misc_preserves_generic_item_prices(self):
         from keyvalues import parse
 
@@ -206,6 +276,114 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(
                 [e["kind"] for e in effects], [expected_kind] if expected_kind else []
             )
+
+    def test_spirit_snatch_binds_separate_recipients_and_preserves_source_values(self):
+        source = b"""{
+            generic_data_type = "CCitadelAbilityVData"
+            ability_test = {
+                m_mapAbilityProperties = {
+                    LightMeleeReduction = { m_strValue = "47" }
+                    TechPowerGain = { m_strValue = "41" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                    TechPowerReduction = { m_strValue = "-41" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" }
+                    TechArmorGain = { m_strValue = "16" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_RESIST" }
+                    TechArmorDamageReduction = { m_strValue = "-16" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_RESIST_REDUCTION" }
+                }
+                m_Watcher = subclass:{
+                    _class = "modifier_spirit_snatch" _my_subclass_name = "watcher"
+                    m_BuffModifier = subclass:{ _class = "modifier_upgrade_spirit_snatch_buff" _my_subclass_name = "buff" }
+                    m_DebuffModifier = subclass:{ _class = "modifier_upgrade_spirit_snatch_debuff" _my_subclass_name = "debuff" }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(
+            {**self.vdata, "abilities.vdata": source},
+            self.localization,
+            SOURCE,
+            self.output,
+        )
+        ability = self.json_catalog("abilities")["records"][0]
+        original = json.dumps(ability["definition"], sort_keys=True)
+        payloads = {
+            name: self.json_catalog(name)
+            for name in ("abilities", "heroes", "modifiers", "misc")
+        }
+        catalogs.add_lookups(payloads)
+        ability = payloads["abilities"]["records"][0]
+        effects = {}
+        for modifier in payloads["modifiers"]["records"]:
+            if modifier["source_file"] != "abilities.vdata":
+                continue
+            role = modifier["definition_path"].rsplit("/", 1)[-1]
+            effects[role] = modifier["stat_changes"]
+            for effect in modifier["stat_changes"]:
+                self.assertEqual(effect["binding_source"], "curated")
+                self.assertEqual(
+                    effect["runtime_count"],
+                    {"source": "modifier", "field": "stack_count", "divisor": 100},
+                )
+                self.assertEqual(
+                    ability["properties"][effect["property_name"]]["modifier_keys"],
+                    [modifier["record_key"]],
+                )
+        self.assertEqual(
+            [(e["property_name"], e["value"]) for e in effects["m_BuffModifier"]],
+            [("TechPowerGain", 41), ("TechArmorGain", 16)],
+        )
+        self.assertEqual(
+            [(e["property_name"], e["value"]) for e in effects["m_DebuffModifier"]],
+            [("TechPowerReduction", -41), ("TechArmorDamageReduction", -16)],
+        )
+        self.assertEqual(effects["m_Watcher"], [])
+        self.assertEqual(json.dumps(ability["definition"], sort_keys=True), original)
+        # Exact engine classes select the rule; explicit registrations take priority.
+        changed = source.replace(b"modifier_spirit_snatch", b"modifier_unrelated")
+        catalogs.build_catalogs(
+            {**self.vdata, "abilities.vdata": changed},
+            self.localization,
+            SOURCE,
+            self.output,
+        )
+        self.assertFalse(
+            any(
+                m["stat_changes"]
+                for m in self.json_catalog("modifiers")["records"]
+                if m["source_file"] == "abilities.vdata"
+            )
+        )
+        older_shape = source.replace(
+            b'MODIFIER_VALUE_TECH_POWER"', b'MODIFIER_VALUE_TECH_POWER_PERCENT"'
+        )
+        catalogs.build_catalogs(
+            {**self.vdata, "abilities.vdata": older_shape},
+            self.localization,
+            SOURCE,
+            self.output,
+        )
+        self.assertFalse(
+            any(
+                m["stat_changes"]
+                for m in self.json_catalog("modifiers")["records"]
+                if m["source_file"] == "abilities.vdata"
+            )
+        )
+        registered = source.replace(
+            b'_class = "modifier_upgrade_spirit_snatch_buff"',
+            b'_class = "modifier_upgrade_spirit_snatch_buff" m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["TechPowerGain"]',
+        )
+        catalogs.build_catalogs(
+            {**self.vdata, "abilities.vdata": registered},
+            self.localization,
+            SOURCE,
+            self.output,
+        )
+        gain = next(
+            e
+            for m in self.json_catalog("modifiers")["records"]
+            for e in m["stat_changes"]
+            if e.get("property_name") == "TechPowerGain"
+        )
+        self.assertEqual(gain["kind"], "bound_property")
+        self.assertNotIn("runtime_count", gain)
 
     def test_curated_counter_binding_preserves_source_values(self):
         payloads = {

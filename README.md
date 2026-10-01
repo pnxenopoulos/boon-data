@@ -195,6 +195,15 @@ the owning definition declares it. Otherwise it has `status: "unresolved"` and
 Root hero, misc, and standalone modifier records also link to their embedded
 modifiers through `modifier_keys`.
 
+An explicit `m_NonEmbeddedModifier` reference with `m_bUseNonEmbedded: true`
+also links an ability property to a standalone modifier. Its bound effect has
+`source_ability_id`. A shared modifier can have bindings from several abilities.
+Select the binding that matches the replay's source ability. If that identity is
+missing, do not select the first binding or add all values. The original source
+`definition` stays unchanged. These links use explicit references and registrations;
+they do not infer an effect from a class name.
+
+
 Records expose `stat_changes` for explicit declarations:
 
 - `kind: "ability_property"`: an ability property with a declared stat mapping,
@@ -789,6 +798,28 @@ it is not an explicit VData registration. The stat change has
 `kind: "inferred_property"` and `binding_source: "curated"`. Apply it only while
 that buff is active. The value and upgrades come from the catalog. An explicit
 VData binding takes priority. Raw definitions remain unchanged.
+
+Spirit Snatch links `TechPowerGain` and `TechArmorGain` to its caster buff.
+It links `TechPowerReduction` and `TechArmorDamageReduction` to its victim debuff.
+These effects use this count descriptor:
+
+```json
+{"source": "modifier", "field": "stack_count", "divisor": 100}
+```
+
+Multiply the upgraded catalog value by `stack_count / divisor`. Spirit power is
+a flat change, not a percentage of the victim's spirit. Replay `108575009.dem`
+records 70 for light hits and 100 for heavy hits; the source defines a 30% light-hit
+reduction. Counts also accumulate and decay. Read each buff and debuff separately.
+When a marked target dies, use the recorded removal or count change; other
+victims can still supply a bonus. Do not infer a new hit from a timestamp refresh.
+This link is curated and uses `kind: "inferred_property"`. Values and upgrades
+stay in VData. Explicit registrations take priority. Raw definitions do not change.
+
+A string `runtime_count` reads an ability entity field. An object names its
+`source` (`ability` or `modifier`), `field`, and optional positive `divisor`.
+The default divisor is 1. The current modifier-field reader supports `stack_count`.
+Missing or invalid counts must leave the effect unresolved.
 
 Trophy Collector links `StackingBonusSprintSpeed` to the ability entity's
 `m_iTrophyCount` while `m_GoldModifier` is active. This engine relationship is
