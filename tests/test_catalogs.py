@@ -385,6 +385,90 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(gain["kind"], "bound_property")
         self.assertNotIn("runtime_count", gain)
 
+    def test_icepath_binds_caster_spirit_with_post_multiplier_flat_bonus(self):
+        source = b"""{
+            generic_data_type = "CCitadelAbilityVData"
+            ability_test = {
+                _class = "ability_icepath"
+                m_mapAbilityProperties = {
+                    BonusSpirit = { m_strValue = "9" m_eProvidedPropertyType = "MODIFIER_VALUE_TECH_POWER" m_eStatsUsageFlags = "IntrinsicallyProvidedInAbility" }
+                    BonusSpiritPct = { m_strValue = "17" }
+                }
+                m_vecAbilityUpgrades = [{ m_vecPropertyUpgrades = [{ m_strPropertyName = "BonusSpirit" m_strBonus = "31" }] }]
+                m_IcePathModifier = subclass:{
+                    _class = "modifier_icepath" _my_subclass_name = "active"
+                    m_BonusSpiritLingerModifier = subclass:{ _class = "modifier_icepath_tech_power_linger" _my_subclass_name = "linger" }
+                    m_FriendlyAuraModifier = subclass:{ _class = "modifier_base_aura" _my_subclass_name = "aura"
+                        m_modifierProvidedByAura = subclass:{ _class = "icepath_friendly_modifier" _my_subclass_name = "friendly" }
+                    }
+                }
+            }
+        }"""
+        catalogs.build_catalogs(
+            {**self.vdata, "abilities.vdata": source},
+            self.localization,
+            SOURCE,
+            self.output,
+        )
+        ability = self.json_catalog("abilities")["records"][0]
+        flat = ability["properties"]["BonusSpirit"]
+        self.assertEqual(flat["usage_flags"], "ConditionallyApplied")
+        self.assertEqual(flat["calculation_stage"], "post_multiplier")
+        self.assertEqual(flat["value"], 9)
+        self.assertEqual(
+            ability["definition"]["m_mapAbilityProperties"]["BonusSpirit"][
+                "m_eStatsUsageFlags"
+            ],
+            "IntrinsicallyProvidedInAbility",
+        )
+        self.assertEqual(
+            ability["definition"]["m_vecAbilityUpgrades"][0]["m_vecPropertyUpgrades"][
+                0
+            ]["m_strBonus"],
+            "31",
+        )
+        modifiers = [
+            m
+            for m in self.json_catalog("modifiers")["records"]
+            if m["ability_id"] == ability["ability_id"]
+        ]
+        active = next(
+            m for m in modifiers if m["definition"]["_class"] == "modifier_icepath"
+        )
+        self.assertEqual(
+            [
+                (e["property_name"], e["stat"], e["value"])
+                for e in active["stat_changes"]
+            ],
+            [
+                ("BonusSpirit", "MODIFIER_VALUE_TECH_POWER", 9),
+                ("BonusSpiritPct", "MODIFIER_VALUE_TECH_POWER_PERCENT", 17),
+            ],
+        )
+        self.assertTrue(
+            all(e["binding_source"] == "curated" for e in active["stat_changes"])
+        )
+        self.assertEqual(flat["modifier_keys"], [active["record_key"]])
+        self.assertTrue(
+            all(not m["stat_changes"] for m in modifiers if m is not active)
+        )
+        # A new explicit registration or a different engine class supersedes this rule.
+        for changed in (
+            source.replace(
+                b'_my_subclass_name = "active"',
+                b'_my_subclass_name = "active" m_vecAutoRegisterModifierValueFromAbilityPropertyName = ["BonusSpirit"]',
+            ),
+            source.replace(b'_class = "ability_icepath"', b'_class = "ability_other"'),
+        ):
+            catalogs.build_catalogs(
+                {**self.vdata, "abilities.vdata": changed},
+                self.localization,
+                SOURCE,
+                self.output,
+            )
+            ability = self.json_catalog("abilities")["records"][0]
+            self.assertNotIn("calculation_stage", ability["properties"]["BonusSpirit"])
+
     def test_curated_counter_binding_preserves_source_values(self):
         payloads = {
             name: self.json_catalog(name)

@@ -425,6 +425,7 @@ def add_lookups(payloads: dict[str, dict]) -> None:
 
     add_ethereal_fire_rate_binding(payloads, by_key)
     add_spirit_snatch_bindings(payloads, by_key)
+    add_icepath_spirit_bindings(payloads, by_key)
 
     for record in payloads["abilities"]["records"]:
         for name, prop in record["properties"].items():
@@ -542,6 +543,64 @@ def add_spirit_snatch_bindings(
                 "field": "stack_count",
                 "divisor": 100,
             }
+            bound = {k: v for k, v in prop.items() if k != "modifier_keys"}
+            modifier["stat_changes"].append(
+                {
+                    "kind": "inferred_property",
+                    "property_name": name,
+                    "binding_source": "curated",
+                    **bound,
+                }
+            )
+            modifier["property_bindings"].append(
+                {
+                    "property_name": name,
+                    "source_record_key": owner_key,
+                    "status": "resolved",
+                    "binding_source": "curated",
+                    "property": bound,
+                }
+            )
+
+
+def add_icepath_spirit_bindings(
+    payloads: dict[str, dict], by_key: dict[str, dict]
+) -> None:
+    """Bind the caster's active spirit bonus and its post-multiplier flat stage."""
+    for modifier in payloads["modifiers"]["records"]:
+        if modifier["definition"].get("_class") != "modifier_icepath" or not modifier[
+            "definition_path"
+        ].endswith("/m_IcePathModifier"):
+            continue
+        owner_key = modifier["record_key"].rsplit("/", 1)[0]
+        owner = by_key[owner_key]
+        properties = owner.get("properties", {})
+        flat = properties.get("BonusSpirit", {})
+        percent = properties.get("BonusSpiritPct", {})
+        if (
+            owner["definition"].get("_class") != "ability_icepath"
+            or flat.get("stat") != "MODIFIER_VALUE_TECH_POWER"
+            or not percent
+            or percent.get("stat") not in (None, "MODIFIER_VALUE_TECH_POWER_PERCENT")
+            or flat["modifier_keys"]
+            or percent["modifier_keys"]
+        ):
+            continue
+        # Curated semantics from Ice Path's calculation description, not an engine
+        # registration: the percentage applies to global spirit, then the flat
+        # bonus is added. Its intrinsic flag describes a known tooltip bug.
+        # Bind only the caster's active modifier, not the friendly movement aura.
+        # No linger application was recorded in replay 108575009; do not infer
+        # that class's payload or lifetime. All amounts/upgrades stay in VData.
+        for name, prop, stat in (
+            ("BonusSpirit", flat, "MODIFIER_VALUE_TECH_POWER"),
+            ("BonusSpiritPct", percent, "MODIFIER_VALUE_TECH_POWER_PERCENT"),
+        ):
+            prop["stat"] = stat
+            prop["usage_flags"] = "ConditionallyApplied"
+            prop["modifier_keys"].append(modifier["record_key"])
+            if name == "BonusSpirit":
+                prop["calculation_stage"] = "post_multiplier"
             bound = {k: v for k, v in prop.items() if k != "modifier_keys"}
             modifier["stat_changes"].append(
                 {

@@ -816,6 +816,20 @@ victims can still supply a bonus. Do not infer a new hit from a timestamp refres
 This link is curated and uses `kind: "inferred_property"`. Values and upgrades
 stay in VData. Explicit registrations take priority. Raw definitions do not change.
 
+Ice Path links `BonusSpirit` and `BonusSpiritPct` to its active caster modifier.
+The percentage uses `MODIFIER_VALUE_TECH_POWER_PERCENT`. Both properties use
+`ConditionallyApplied` in the normalized catalog. `BonusSpirit` also has
+`calculation_stage: "post_multiplier"`: multiply ordinary global spirit by each
+percentage source, then add this flat bonus. The amount and upgrades come from
+VData. Missing stages mean an ordinary flat bonus before the multipliers.
+
+This curated rule follows the reported Ice Path equation and tooltip bug.
+The raw `IntrinsicallyProvidedInAbility` flag remains in `definition`.
+The effect has `kind: "inferred_property"` and `binding_source: "curated"`.
+Do not apply it from the friendly movement aura or infer a linger effect.
+No linger application was recorded in replay `108575009.dem`. Explicit
+registrations take priority; ally spirit scope still needs verification.
+
 A string `runtime_count` reads an ability entity field. An object names its
 `source` (`ability` or `modifier`), `field`, and optional positive `divisor`.
 The default divisor is 1. The current modifier-field reader supports `stack_count`.
