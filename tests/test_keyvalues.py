@@ -50,10 +50,25 @@ class KeyValuesTests(unittest.TestCase):
             },
         )
 
+    def test_identical_localization_tokens_share_a_value(self):
+        data = parse(
+            '"lang" {"Tokens" {'
+            '"ShoveRadius_postvalue_label" "Shove Radius" '
+            '"ShoveRadius_postfix" "m" '
+            '"ShoveRadius_postvalue_label" "Shove Radius" '
+            '"ShoveRadius_postfix" "m"}}',
+            kv1=True,
+        )
+        self.assertEqual(
+            data["lang"]["Tokens"],
+            {"ShoveRadius_postvalue_label": "Shove Radius", "ShoveRadius_postfix": "m"},
+        )
+
     def test_rejects_invalid_and_duplicate_definitions(self):
         for text in (
             "{ a = 1",
             "{a=1 a=2}",
+            "{a=1 a=1}",
             "{a=[1,2}",
             '{a="unterminated}',
             "{a=1} trailing",
@@ -62,5 +77,12 @@ class KeyValuesTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse(text)
-        with self.assertRaisesRegex(ValueError, "duplicate key"):
-            parse('"lang" {"a" "1" "a" "2"}', kv1=True)
+        for text in (
+            '"lang" {"a" "1" "a" "2"}',
+            '"lang" {"Tokens" {"a" "1"} "Tokens" {"a" "1"}}',
+        ):
+            with (
+                self.subTest(text=text),
+                self.assertRaisesRegex(ValueError, "duplicate key"),
+            ):
+                parse(text, kv1=True)

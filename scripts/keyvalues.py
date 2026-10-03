@@ -1,8 +1,8 @@
 """Read the text KV3 and localization KV1 formats used by GameTracking.
 
 Typed KV3 values remain explicit so catalog JSON does not discard resource or
-subclass annotations. Unsupported/malformed input fails instead of yielding a
-partial catalog; this is not a reader for binary KV3.
+subclass annotations. Identical KV1 string entries share one value. Conflicting
+entries and malformed input fail; this is not a reader for binary KV3.
 """
 
 from __future__ import annotations
@@ -93,11 +93,14 @@ class _Reader:
         result = {}
         while self.token is not None and self.token != ("punct", "}"):
             key = self.string()
-            if key in result:
-                self.fail(f"duplicate key {key!r}")
             if not self.kv1:
                 self.take("=")
-            result[key] = self.value()
+            value = self.value()
+            if key in result and not (
+                self.kv1 and isinstance(value, str) and result[key] == value
+            ):
+                self.fail(f"duplicate key {key!r}")
+            result[key] = value
             if self.token == ("punct", ","):
                 self.advance()
         if wrapped:

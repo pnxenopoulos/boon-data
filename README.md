@@ -88,6 +88,8 @@ conditional, upgrade, and scaled values requires separate game logic.
 Each JSON catalog contains `source_commit` and `client_version`, and each record
 contains its identity and complete parsed `definition`.
 KV3 annotations are represented as `{"$type": "subclass", "$value": {...}}`.
+Identical repeated English localization entries use one value. Conflicting entries
+and duplicate VData keys are errors.
 Missing localization is null; unspecified source fields remain absent from
 `definition`. Disabled, unreleased, and template definitions are retained
 for historical analysis.
