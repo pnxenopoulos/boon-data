@@ -3,7 +3,10 @@ name = "boon-data"
 version = "0.1.0"
 description = "Versioned Deadlock JSON stat catalogs"
 requires-python = ">=3.11"
-dependencies = ["polars==1.38.1"]
+dependencies = [
+    "pillow>=13.0.0",
+    "polars==1.38.1",
+]
 
 [dependency-groups]
 dev = [

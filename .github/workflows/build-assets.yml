@@ -7,6 +7,10 @@ on:
         description: GameTracking-Deadlock branch, tag, or commit
         default: master
         type: string
+      images:
+        description: Extract images from a matching Deadlock install on the configured runner
+        type: boolean
+        default: false
   schedule:
     - cron: "0 * * * *"
 
@@ -19,15 +23,21 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.BOON_DATA_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: write
+    env:
+      DEADLOCK_DIR: ${{ vars.DEADLOCK_DIR }}
+      SOURCE2VIEWER_CLI: ${{ vars.SOURCE2VIEWER_CLI }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
         with:
           version: "0.11.28"
           enable-cache: true
+      - name: Install Source2Viewer-CLI
+        if: ${{ (inputs.images || (github.event_name == 'schedule' && vars.DEADLOCK_DIR != '')) && vars.SOURCE2VIEWER_CLI == '' }}
+        run: bash scripts/install-source2viewer.sh
       - run: uv sync --locked
       - name: Check Python quality
         run: |
@@ -40,4 +50,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.ref || 'master' }}
-        run: uv run --locked python scripts/publish.py --ref "$SOURCE_REF" --vdata-only --publish
+          INCLUDE_IMAGES: ${{ inputs.images || (github.event_name == 'schedule' && vars.DEADLOCK_DIR != '') }}
+        run: |
+          args=()
+          if [ "$INCLUDE_IMAGES" = true ]; then
+            args+=(--images)
+          fi
+          uv run --locked python scripts/publish.py --ref "$SOURCE_REF" --vdata-only "${args[@]}" --publish

@@ -1,13 +1,16 @@
 # boon-data
 
-Versioned Deadlock JSON stat catalogs for [Boon](https://github.com/pnxenopoulos/boon).
+Versioned Deadlock stat catalogs and plotting assets for [Boon](https://github.com/pnxenopoulos/boon).
 The pipeline downloads the `.vdata` files directly from
 [SteamTracking/GameTracking-Deadlock](https://github.com/SteamTracking/GameTracking-Deadlock),
 joins English names from the same commit, and publishes four JSON catalogs
-and a JSON manifest as GitHub Release assets. `versions.json` lists available
+and a JSON manifest as GitHub Release assets. Optional plotting bundles add map
+layers and hero, item, ability, and stat images extracted from a matching game install with
+[Source2Viewer](https://s2v.app/). `versions.json` lists available
 Deadlock client versions, release timestamps, download URLs, and checksums.
 It uses [uv](https://docs.astral.sh/uv/) to manage Python 3.11+ and dependencies.
-No game install, Steam login, VPK extraction tools, or map images are needed.
+Catalog builds need no game install or Steam login. Image builds need matching
+game files and Source2Viewer-CLI.
 
 Scripts and tests live on the default branch; the publisher maintains
 `versions.json` on a separate `data-index` branch. Generated bundles go under
@@ -73,9 +76,124 @@ its artifacts are identical, and never overwrites different artifacts.
 └── misc.json
 ```
 
-These five JSON files are the complete release. ZIP archives and Parquet files
-are not built or uploaded by the publisher. The manifest pins the original
-upstream commit and input hashes, so source files can be fetched again for audits.
+These five JSON files are the catalog bundle. With `--images`, a release also
+contains `images.json` and `images.zip`. Source ZIP archives and Parquet exports
+are not published. The manifest pins the upstream commit and input hashes.
+
+## Plotting images
+
+Install the pinned Source2Viewer-CLI 20.1 build on Linux x64:
+
+```bash
+bash scripts/install-source2viewer.sh
+```
+
+The installer checks the archive's SHA-256 and puts the tool under ignored
+`.work/source2viewer/20.1/`. For other systems, download the CLI from the
+[official releases](https://github.com/ValveResourceFormat/ValveResourceFormat/releases/tag/20.1)
+and pass `--source2viewer /path/to/Source2Viewer-CLI`.
+
+Build with an existing Deadlock install and a matching GameTracking commit:
+
+```bash
+uv run --locked python scripts/pipeline.py \
+  --ref <upstream-commit> \
+  --images --game-dir "/path/to/Deadlock"
+```
+
+The install root contains `game/citadel/steam.inf` and `game/citadel/pak01_dir.vpk`.
+`DEADLOCK_DIR` can replace `--game-dir`. `SOURCE2VIEWER_CLI` can replace
+`--source2viewer`; the builder also checks the pinned tool location and `PATH`.
+The same options work with `scripts/publish.py`.
+
+The image builder in `scripts/images.py` requires `ClientVersion` and
+`SourceRevision` to match
+the catalog snapshot. It checks the version file and VPK index again after
+extraction. Historical images require an install from that historical build;
+a current install cannot supply images for an older snapshot.
+
+- Hero roles are `minimap`, `icon`, and `card`. Their resource paths come from
+  `m_strMinimapImage`, `m_strIconImageSmall`, and `m_strIconHeroCard` in the catalog.
+  Panorama references are converted to compiled texture paths; hero names and IDs
+  are not mapped in code.
+- The map includes only these textures from `panorama/images/minimap/base/`:
+  `minimap_midtown_mid_psd`, `minimap_midtown_mid_tunnels_psd`, and
+  `minimap_midtown_rat_tunnels_psd`. Keys retain the full `.vtex_c` resource paths.
+- Items and abilities use `ability_id` from `abilities.json`. Records with
+  `m_eAbilityType: "EAbilityType_Item"` go in `images.json.items`; all other
+  ability records go in `images.json.abilities`. Names and IDs come from the catalog.
+  Items include only `shop` (`m_strShopIconLarge`), with no HUD icon fallback.
+  Ability roles are `icon` (`m_strAbilityImage`) and `single_door`
+  (`m_strSingleDoorAbilityImage`, when declared).
+- Stat icons come from `panorama/images/icons/properties/` in the VPK.
+  `images.json.stats` maps game filenames without extensions, such as `fire_rate`,
+  `ammo_clip_size`, and `resist_spirit`, to image metadata. All icons in that
+  directory are included. There is no fixed map to Boon stat names. If the
+  directory is absent, `stats` is empty.
+- `images.zip` contains PNGs and SVGs under `maps/`, `heroes/<hero_id>/`,
+  `items/<ability_id>/`, `abilities/<ability_id>/`, and `stats/`. Read each image's `path`
+  from `images.json`: shared textures use one archive entry, which can be in
+  another record's folder. Source2Viewer preserves transparency; SVG icons
+  keep their vector format.
+- `images.json` records archive paths, source resource paths, dimensions, image
+  checksums, the client version, source commit, tool version and executable hash,
+  and version-file and VPK-index hashes. It contains no local install paths.
+- Undeclared or absent textures remain `null`. Declared textures missing from
+  the VPK are listed in `missing_images`, including missing selected map layers.
+  A tool failure, invalid image, missing extraction output, or an install without
+  any of the three selected map textures stops the build.
+- Map radius stays `null`: textures alone do not establish world bounds,
+  orientation, or a world-to-image transform. Consumers must supply that mapping.
+  ZIP metadata is fixed so identical inputs produce identical bundles.
+
+The manifest and version index list the two files under `plotting_artifacts`.
+The existing `artifacts` map retains the catalog files, so current `boon get`
+clients still work. Download `images.json` and `images.zip` separately for plots:
+
+```python
+import io
+import json
+from pathlib import Path
+from zipfile import ZipFile
+
+from PIL import Image
+
+snapshot = Path(".work/dist/<client-version>")
+images = json.loads((snapshot / "images.json").read_text())
+print(list(images["map"]["images"]))  # The three selected minimap layers.
+print(images["items"])  # Item IDs, names, and shop image metadata.
+print(images["abilities"])  # Ability IDs, names, and icon metadata.
+print(images["stats"]["fire_rate"])  # Path, dimensions, source, and checksum.
+
+# Example: load a hero's minimap icon using a hero_id from the demo.
+hero_id = 1
+entry = images["heroes"][str(hero_id)]["images"]["minimap"]
+if entry is not None:
+    with ZipFile(snapshot / "images.zip") as archive:
+        with Image.open(io.BytesIO(archive.read(entry["path"]))) as icon:
+            print(icon.size)
+```
+
+### Image builds in GitHub Actions
+
+Hosted runners build catalogs by default. To include images, configure a trusted
+Linux x64 runner with matching game files and these repository variables:
+
+| Variable | Value |
+| --- | --- |
+| `BOON_DATA_RUNNER` | Runner label, for example `deadlock-data`; omit for `ubuntu-latest` |
+| `DEADLOCK_DIR` | Absolute install path on that runner |
+| `SOURCE2VIEWER_CLI` | Optional executable path; otherwise the job installs the pinned CLI |
+
+The main workflow includes images on scheduled runs when `DEADLOCK_DIR` is set.
+Both manual workflows have an `images` switch, off by default. They use the same
+runner variables. A version mismatch stops the image build; the workflow does
+not download or update game files. Use archived installs for historical image
+backfills, or leave images off to build only catalogs.
+
+Existing releases are reused without adding or replacing files. Image-only
+changes do not bypass the VData release gate. Game images belong to Valve;
+the repository's MIT license applies to the scripts.
 
 ## Stat catalogs
 
@@ -507,6 +625,7 @@ The JSON definitions retain these source fields without resolving them.
 | `schema_files` | Map of enum and scaling-class schema paths to SHA-256 and byte count |
 | `engine_string_files` | Map of client/server string-dump paths to SHA-256 and byte count |
 | `artifacts` | Map of the four JSON catalogs to SHA-256 and byte count (the manifest itself is fingerprinted in the index) |
+| `plotting_artifacts` | Optional `images.json` and `images.zip` checksums and byte counts; index entries also include download URLs |
 | `snapshot.content_sha256` | Fingerprint of the VData, localization, schema, and engine-string input names, hashes, and sizes |
 | `snapshot.generator_sha256` | Fingerprint of the catalog/parser/packaging code, `pyproject.toml`, `uv.lock`, and installed Polars version |
 | `snapshot.dataset_sha256` | Fingerprint combining content and generator revision |
@@ -525,8 +644,9 @@ GitHub publishes the verified release. Published assets are never replaced.
 ## Publishing and change detection
 
 `.github/workflows/build-assets.yml` checks hourly, at minute 0 (UTC), and
-supports manual runs with an upstream `ref`. Both use
-`scripts/publish.py --vdata-only --publish` to gate new releases on changes to
+supports manual runs with an upstream `ref`. Runs use
+`scripts/publish.py --vdata-only --publish`, with `--images` when configured,
+to gate new releases on changes to
 `abilities.vdata`, `heroes.vdata`, `modifiers.vdata`, `misc.vdata`,
 `npc_units.vdata`, or `generic_data.vdata`:
 
@@ -950,6 +1070,6 @@ For example, the source used for client version `6698` contains
 helps identify the modifier; it does not establish its gameplay effects.
 
 All new source files have Git blob checks and manifest fingerprints. The release
-still contains four catalogs and a manifest. Existing published files do not
+still contains four catalogs and a manifest, plus optional plotting files. Existing published files do not
 change; a new build is required to include this metadata. Scheduled checks
 continue to use the six VData files as their release gate.

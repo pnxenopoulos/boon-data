@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -14,6 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import images
 import polars as pl
 from catalogs import LOCALIZATION_FILES, VDATA_FILES, build_catalogs
 from engine_metadata import (
@@ -85,6 +87,7 @@ def generator_fingerprint() -> str:
     root = Path(__file__).resolve().parents[1]
     files = (
         "scripts/pipeline.py",
+        "scripts/images.py",
         "scripts/catalogs.py",
         "scripts/engine_metadata.py",
         "scripts/keyvalues.py",
@@ -217,7 +220,13 @@ def download_inputs(source: dict) -> tuple[dict[str, bytes], dict[str, bytes]]:
 
 
 def build(
-    source: dict, output: Path, *, inputs: tuple[dict, dict] | None = None
+    source: dict,
+    output: Path,
+    *,
+    inputs: tuple[dict, dict] | None = None,
+    include_images: bool = False,
+    game_dir: Path | None = None,
+    source2viewer: Path | None = None,
 ) -> Path:
     """Build deterministic artifacts and preserve any already-built snapshot."""
     contents, localization = download_inputs(source) if inputs is None else inputs
@@ -234,20 +243,39 @@ def build(
         stage = Path(temporary) / "bundle"
         stage.mkdir()
         catalogs = build_catalogs(contents, localization, source, stage)
+        if include_images:
+            images.build(source, stage, game_dir=game_dir, source2viewer=source2viewer)
         artifacts = {
             path.name: fingerprint(path.read_bytes())
             for path in sorted(stage.iterdir())
+            if path.name not in images.ARTIFACTS
         }
         manifest = {
             **source,
             "catalogs": catalogs,
             "artifacts": artifacts,
+            **(
+                {
+                    "plotting_artifacts": {
+                        name: fingerprint((stage / name).read_bytes())
+                        for name in sorted(images.ARTIFACTS)
+                    }
+                }
+                if include_images
+                else {}
+            ),
         }
         (stage / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         if destination.exists():
-            for name in ("manifest.json", *artifacts):
+            if {path.name for path in destination.iterdir()} != {
+                path.name for path in stage.iterdir()
+            }:
+                raise ValueError(
+                    f"refusing to overwrite different artifacts for {destination.name}"
+                )
+            for name in (path.name for path in stage.iterdir()):
                 if (destination / name).read_bytes() != (stage / name).read_bytes():
                     raise ValueError(
                         f"refusing to overwrite different artifacts for {destination.name}"
@@ -268,14 +296,29 @@ def main() -> None:
     parser.add_argument(
         "--resolve", action="store_true", help="Print source metadata without building."
     )
+    images.add_arguments(parser)
     args = parser.parse_args()
     try:
         source = resolve_source(args.ref)
         if args.resolve:
             print(json.dumps(source, indent=2))
         else:
-            print(build(source, args.output))
-    except (OSError, ValueError, KeyError, TypeError) as error:
+            print(
+                build(
+                    source,
+                    args.output,
+                    include_images=args.images,
+                    game_dir=args.game_dir,
+                    source2viewer=args.source2viewer,
+                )
+            )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.CalledProcessError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
