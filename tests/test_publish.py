@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import catalogs
+import images
 import pipeline
 import publish
 from test_engine_metadata import engine_sources
@@ -137,6 +138,70 @@ class PublisherTests(unittest.TestCase):
             SOURCE, self.inputs, self.initial, self.output, latest=True
         )
         self.github = FakeGitHub()
+
+    def plotting_plan(self):
+        def build_images(source, directory, **kwargs):
+            (directory / "images.json").write_text("{}\n")
+            (directory / "images.zip").write_bytes(b"synthetic archive")
+
+        with patch.object(images, "build", side_effect=build_images):
+            return publish.make_plan(
+                source_at(),
+                self.inputs,
+                self.initial,
+                self.output,
+                latest=False,
+                include_images=True,
+            )
+
+    def test_plotting_assets_are_published_separately_from_catalog_downloads(self):
+        plan = self.plotting_plan()
+        publish.publish_plan(self.github, plan, self.initial, None, TARGET)
+        record = self.github.index["versions"]["1235"]
+        self.assertEqual(
+            set(record["artifacts"]), publish.ARTIFACTS | {"manifest.json"}
+        )
+        self.assertEqual(set(record["plotting_artifacts"]), images.ARTIFACTS)
+        self.assertEqual(
+            {asset["name"] for asset in self.github.remote["1235"]["assets"]},
+            publish.ARTIFACTS | images.ARTIFACTS | {"manifest.json"},
+        )
+
+    def test_partial_plotting_manifests_are_rejected(self):
+        plan = self.plotting_plan()
+        manifest = json.loads((Path(plan["directory"]) / "manifest.json").read_bytes())
+        manifest["plotting_artifacts"].pop("images.zip")
+        with self.assertRaisesRegex(ValueError, "incomplete plotting"):
+            publish.snapshot_record(json.dumps(manifest).encode())
+
+    def test_index_rejects_plotting_metadata_that_disagrees_with_snapshot(self):
+        plan = self.plotting_plan()
+        index = plan["index"]
+        index["versions"]["1235"]["plotting_artifacts"] = {}
+        with self.assertRaisesRegex(ValueError, "inconsistent release metadata"):
+            publish.validate_index(index)
+
+    def test_plotting_assets_are_verified_when_recovering_the_index(self):
+        plan = self.plotting_plan()
+        publish.publish_plan(self.github, plan, self.initial, None, TARGET)
+        for asset in self.github.remote["1235"]["assets"]:
+            if asset["name"] == "images.zip":
+                asset["digest"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "checksum mismatch: images.zip"):
+            publish.recover_snapshots(self.github, publish.empty_index())
+
+    def test_image_requests_do_not_replace_existing_catalog_only_releases(self):
+        publish.publish_plan(self.github, self.plan, self.initial, None, TARGET)
+        plan = publish.make_plan(
+            SOURCE,
+            self.inputs,
+            self.github.index,
+            self.output,
+            latest=True,
+            include_images=True,
+        )
+        self.assertEqual(plan["action"], "reuse")
+        self.assertNotIn("plotting_artifacts", plan["index"]["versions"]["1234"])
 
     def test_engine_metadata_manifest_is_accepted_and_tampering_is_rejected(self):
         inputs = (self.inputs[0], {**self.inputs[1], **engine_sources()})

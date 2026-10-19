@@ -16,6 +16,7 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+import images
 import pipeline
 from keyvalues import to_json
 
@@ -29,6 +30,19 @@ ARTIFACTS = {
     "modifiers.json",
     "misc.json",
 }
+
+
+def release_artifacts(record: dict) -> dict:
+    """Include optional plotting assets without changing Boon's catalog downloads."""
+    return {**record["artifacts"], **record.get("plotting_artifacts", {})}
+
+
+def validate_plotting(record: dict) -> None:
+    if "plotting_artifacts" in record and (
+        not isinstance(record["plotting_artifacts"], dict)
+        or set(record["plotting_artifacts"]) != images.ARTIFACTS
+    ):
+        raise ValueError("release has an incomplete plotting artifact set")
 
 
 def empty_index() -> dict:
@@ -58,6 +72,7 @@ def validate_index(index: dict, *, published: bool = False) -> dict:
     ):
         raise TypeError("invalid version index mappings")
     for record in index["snapshots"].values():
+        validate_plotting(record)
         if published or record["released_at"] is not None:
             published_time(record["released_at"])
         if set(record["artifacts"]) != ARTIFACTS | {"manifest.json"}:
@@ -70,7 +85,10 @@ def validate_index(index: dict, *, published: bool = False) -> dict:
         ):
             raise ValueError("version index has an invalid snapshot reference")
         record = index["snapshots"][entry["snapshot"]]
-        if any(entry[key] != record[key] for key in ("released_at", "artifacts")):
+        if any(
+            entry.get(key) != record.get(key)
+            for key in ("released_at", "artifacts", "plotting_artifacts")
+        ):
             raise ValueError("version index has inconsistent release metadata")
     if index["latest"] is not None and index["latest"] not in index["versions"]:
         raise ValueError("version index has an invalid latest reference")
@@ -89,6 +107,7 @@ def snapshot_record(
         raise ValueError("unexpected snapshot source repository")
     if set(manifest["artifacts"]) != ARTIFACTS:
         raise ValueError("snapshot manifest does not describe a complete release")
+    validate_plotting(manifest)
     inputs = {key: manifest[key] for key in ("files", "localization_files")}
     for key in ("schema_files", "engine_string_files"):
         if manifest.get(key):
@@ -105,14 +124,15 @@ def snapshot_record(
     if dataset != identity["dataset_sha256"]:
         raise ValueError("invalid dataset fingerprint")
     artifacts = {**manifest["artifacts"], "manifest.json": pipeline.fingerprint(data)}
-    for item in artifacts.values():
+    image_artifacts = manifest.get("plotting_artifacts", {})
+    for item in (*artifacts.values(), *image_artifacts.values()):
         if (
             type(item["bytes"]) is not int
             or item["bytes"] < 0
             or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
         ):
             raise ValueError("invalid artifact fingerprint")
-    for name, item in artifacts.items():
+    for name, item in {**artifacts, **image_artifacts}.items():
         item["url"] = f"https://github.com/{repository}/releases/download/{tag}/{name}"
     return tag, {
         "released_at": None,
@@ -121,6 +141,7 @@ def snapshot_record(
         "client_version": manifest["client_version"],
         "source": manifest["source"],
         "artifacts": artifacts,
+        **({"plotting_artifacts": image_artifacts} if image_artifacts else {}),
     }
 
 
@@ -148,7 +169,13 @@ def observe(index: dict, source: dict, tag: str, *, latest: bool) -> None:
     }
     entry["snapshot"] = tag
     record = index["snapshots"][tag]
-    entry.update({key: record[key] for key in ("released_at", "artifacts")})
+    entry.update(
+        {
+            key: record[key]
+            for key in ("released_at", "artifacts", "plotting_artifacts")
+            if key in record
+        }
+    )
     previous = index["latest"]
     previous_date = (
         index["versions"][previous]["source"]["committed_at"] if previous else None
@@ -175,6 +202,9 @@ def make_plan(
     latest: bool,
     repository: str = DEFAULT_REPOSITORY,
     vdata_only: bool = False,
+    include_images: bool = False,
+    game_dir: Path | None = None,
+    source2viewer: Path | None = None,
     published_tags: set[str] | None = None,
 ) -> dict:
     metadata = pipeline.snapshot_metadata(source, *inputs)
@@ -229,14 +259,28 @@ def make_plan(
                 f"client version {source['client_version']} already has different "
                 "source content; refusing to overwrite its release"
             )
-        directory = pipeline.build(source, output, inputs=inputs)
+        directory = pipeline.build(
+            source,
+            output,
+            inputs=inputs,
+            include_images=include_images,
+            game_dir=game_dir,
+            source2viewer=source2viewer,
+        )
         tag, record = snapshot_record(
             (directory / "manifest.json").read_bytes(), repository
         )
         index["snapshots"][tag] = record
         for entry in index["versions"].values():
             if entry["snapshot"] == tag:
-                entry.update({key: record[key] for key in ("released_at", "artifacts")})
+                entry.pop("plotting_artifacts", None)
+                entry.update(
+                    {
+                        key: record[key]
+                        for key in ("released_at", "artifacts", "plotting_artifacts")
+                        if key in record
+                    }
+                )
     observe(index, source, tag, latest=latest)
     return {
         "action": "publish" if directory else "reuse",
@@ -309,7 +353,9 @@ class GitHub:
                 "--method",
                 "POST",
                 "--header",
-                "Content-Type: application/json",
+                "Content-Type: application/zip"
+                if path.suffix == ".zip"
+                else "Content-Type: application/json",
                 "--input",
                 str(path),
                 "--silent",
@@ -370,10 +416,11 @@ def verify_release(
         raise ValueError(f"snapshot release is missing: {record['client_version']}")
     if published and (release["draft"] or release["prerelease"]):
         raise ValueError(f"snapshot release is not published: {release['tag_name']}")
+    expected_artifacts = release_artifacts(record)
     assets = {asset["name"]: asset for asset in release["assets"]}
-    if len(assets) != len(release["assets"]) or set(assets) != set(record["artifacts"]):
+    if len(assets) != len(release["assets"]) or set(assets) != set(expected_artifacts):
         raise ValueError("release does not contain the complete artifact set")
-    for name, expected in record["artifacts"].items():
+    for name, expected in expected_artifacts.items():
         asset = assets[name]
         if asset["state"] != "uploaded" or asset["size"] != expected["bytes"]:
             raise ValueError(f"incomplete release asset: {name}")
@@ -392,7 +439,14 @@ def record_publication(index: dict, tag: str, release: dict) -> None:
     record["released_at"] = published_time(release.get("published_at"))
     for entry in index["versions"].values():
         if entry["snapshot"] == tag:
-            entry.update({key: record[key] for key in ("released_at", "artifacts")})
+            entry.pop("plotting_artifacts", None)
+            entry.update(
+                {
+                    key: record[key]
+                    for key in ("released_at", "artifacts", "plotting_artifacts")
+                    if key in record
+                }
+            )
 
 
 def recover_snapshots(
@@ -445,7 +499,8 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
     if plan["action"] == "reuse" or release is not None and not release["draft"]:
         return verify_release(github, release, record, published=True)
     directory = Path(plan["directory"])
-    for name, checksum in record["artifacts"].items():
+    artifacts = release_artifacts(record)
+    for name, checksum in artifacts.items():
         if pipeline.fingerprint((directory / name).read_bytes()) != {
             key: checksum[key] for key in ("sha256", "bytes")
         }:
@@ -478,15 +533,15 @@ def publish_snapshot(github: GitHub, plan: dict, target: str) -> dict:
     if not release["draft"]:
         raise ValueError("refusing to upload assets to a non-draft release")
     existing = {asset["name"] for asset in release["assets"]}
-    if not existing <= record["artifacts"].keys():
+    if not existing <= artifacts.keys():
         raise ValueError("draft release contains unexpected assets")
     verify_release(
         github,
         release,
-        {"artifacts": {name: record["artifacts"][name] for name in existing}},
+        {"artifacts": {name: artifacts[name] for name in existing}},
         published=False,
     )
-    for name in sorted(record["artifacts"].keys() - existing):
+    for name in sorted(artifacts.keys() - existing):
         github.upload_asset(release["id"], directory / name)
     verify_release(github, github.api(endpoint), record, published=False)
     release = github.api(
@@ -530,6 +585,7 @@ def main() -> None:
         action="store_true",
         help="Reuse the latest snapshot when the tracked VData files are unchanged.",
     )
+    images.add_arguments(parser)
     parser.add_argument("--output", type=Path, default=Path(".work/dist"))
     parser.add_argument(
         "--repository",
@@ -576,6 +632,9 @@ def main() -> None:
             latest=args.ref == "master",
             repository=github.repository,
             vdata_only=args.vdata_only,
+            include_images=args.images,
+            game_dir=args.game_dir,
+            source2viewer=args.source2viewer,
             published_tags=published_tags,
         )
         if args.publish:
