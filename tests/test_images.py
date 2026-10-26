@@ -363,6 +363,46 @@ class ImageTests(unittest.TestCase):
             self.build()
         self.assertFalse((self.directory / "images.zip").exists())
 
+    def test_minimap_bounds_come_from_map_entities(self):
+        vpk = self.game / "game/citadel/maps/dl_midtown.vpk"
+        vpk.parent.mkdir(parents=True)
+        vpk.write_bytes(b"map VPK")
+
+        def extract(tool, *args):
+            if "--block" in args:
+                return """values = { classname = "citadel_minimap_boundary" origin = [ 40, 90, 0 ] }
+                values = { classname = "citadel_minimap_boundary" origin = [ -20, -10, 0 ] }"""
+            Path(args[args.index("-o") + 1]).write_bytes(b"compiled entities")
+            return ""
+
+        with patch.object(image_assets, "run", side_effect=extract):
+            info = image_assets.map_metadata(self.game, self.tool, self.directory)
+        self.assertEqual(info["bounds"], [-20, -10, 40, 90])
+        self.assertEqual(
+            info["bounds_source"]["sha256"],
+            hashlib.sha256(b"compiled entities").hexdigest(),
+        )
+
+    def test_absent_map_file_leaves_bounds_unknown(self):
+        self.assertIsNone(self.build()["map"]["bounds"])
+
+    def test_single_minimap_boundary_is_rejected(self):
+        vpk = self.game / "game/citadel/maps/dl_midtown.vpk"
+        vpk.parent.mkdir(parents=True)
+        vpk.write_bytes(b"map VPK")
+
+        def extract(tool, *args):
+            if "--block" in args:
+                return 'values = { classname = "citadel_minimap_boundary" origin = [ 1, 2, 0 ] }'
+            Path(args[args.index("-o") + 1]).write_bytes(b"compiled entities")
+            return ""
+
+        with (
+            patch.object(image_assets, "run", side_effect=extract),
+            self.assertRaisesRegex(ValueError, "two distinct"),
+        ):
+            image_assets.map_metadata(self.game, self.tool, self.directory)
+
     def test_provenance_records_tool_and_vpk_hashes(self):
         index = self.build()
         self.assertEqual(index["tool"]["version"], "Version: test-extractor")

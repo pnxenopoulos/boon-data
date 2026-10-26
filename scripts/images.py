@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
 
+from keyvalues import parse
 from PIL import Image
 
 ARTIFACTS = {"images.json", "images.zip"}
@@ -136,6 +138,56 @@ def catalog_records(source: dict, directory: Path, name: str) -> list[dict]:
     ):
         raise ValueError(f"{name} catalog does not match the requested snapshot")
     return catalog["records"]
+
+
+def map_metadata(game_dir: Path, tool: Path, directory: Path) -> dict:
+    """Read the selected Midtown minimap's boundary entities from its map VPK."""
+    relative = Path("game/citadel/maps/dl_midtown.vpk")
+    vpk = game_dir / relative
+    if not vpk.is_file():
+        return {"name": "dl_midtown", "bounds": None}
+    before = vpk.stat()
+    resource = "maps/dl_midtown/entities/default_ents.vents_c"
+    with tempfile.TemporaryDirectory(prefix=".bounds-", dir=directory) as temporary:
+        compiled = Path(temporary) / "entities.vents_c"
+        run(tool, "-i", str(vpk), "-f", resource, "-o", str(compiled))
+        dump = run(tool, "-i", str(compiled), "--block", "DATA")
+        corners = []
+        # The boundary entities have flat key/value properties. Parse those
+        # blocks, leaving unrelated binary entity fields outside the KV3 reader.
+        for match in re.finditer(r"\bvalues\s*=\s*(\{[^{}]*\})", dump):
+            if "citadel_minimap_boundary" not in match[1]:
+                continue
+            entity = parse(match[1])
+            if entity.get("classname") == "citadel_minimap_boundary":
+                corners.append(entity["origin"][:2])
+        if (
+            len(corners) != 2
+            or any(
+                len(point) != 2 or not all(math.isfinite(v) for v in point)
+                for point in corners
+            )
+            or any(corners[0][axis] == corners[1][axis] for axis in range(2))
+        ):
+            raise ValueError(
+                "the map must declare two distinct minimap boundary corners"
+            )
+        bounds = [min(point[axis] for point in corners) for axis in range(2)] + [
+            max(point[axis] for point in corners) for axis in range(2)
+        ]
+        result = {
+            "name": "dl_midtown",
+            "bounds": bounds,
+            "bounds_source": {
+                "vpk": relative.as_posix(),
+                "resource": resource,
+                **fingerprint(compiled.read_bytes()),
+            },
+        }
+    after = vpk.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError("the map changed during boundary extraction")
+    return result
 
 
 def build(
@@ -290,6 +342,7 @@ def build(
                     "height": height,
                 },
             )
+    map_info = map_metadata(game_dir, tool, directory)
     if (game_dir / STEAM_INF).read_bytes() != steam or fingerprint(
         vpk.read_bytes()
     ) != vpk_hash:
@@ -308,7 +361,7 @@ def build(
             "steam_inf": fingerprint(steam),
             "vpk": {"path": PAK.as_posix(), **vpk_hash},
         },
-        "map": {"radius": None, "images": maps},
+        "map": {**map_info, "radius": None, "images": maps},
         "heroes": heroes,
         "items": items,
         "abilities": abilities,

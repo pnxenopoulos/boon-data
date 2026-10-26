@@ -142,9 +142,13 @@ a current install cannot supply images for an older snapshot.
   the VPK are listed in `missing_images`, including missing selected map layers.
   A tool failure, invalid image, missing extraction output, or an install without
   any of the three selected map textures stops the build.
-- Map radius stays `null`: textures alone do not establish world bounds,
-  orientation, or a world-to-image transform. Consumers must supply that mapping.
-  ZIP metadata is fixed so identical inputs produce identical bundles.
+- `map.bounds` gives `[x_min, y_min, x_max, y_max]` from the two
+  `citadel_minimap_boundary` entities in `game/citadel/maps/dl_midtown.vpk`.
+  World +Y points up. `bounds_source` records the map and entity resource paths
+  and the compiled entity data checksum. Missing map files leave bounds `null`;
+  malformed or ambiguous boundary data stops the build. `map.name` is `dl_midtown`.
+  The legacy radius field stays `null`. ZIP metadata is fixed so identical
+  inputs produce identical bundles.
 
 The manifest and version index list the two files under `plotting_artifacts`.
 The existing `artifacts` map retains the catalog files, so current `boon get`
